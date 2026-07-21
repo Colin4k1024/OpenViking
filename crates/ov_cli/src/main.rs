@@ -2552,10 +2552,22 @@ fn language_command_can_run_picker(has_language_value: bool, is_interactive: boo
     has_language_value || is_interactive
 }
 
+fn render_help_request(args: &[OsString]) -> Option<String> {
+    if help_ui::is_top_level_help_request(args) {
+        Some(help_ui::render_top_level_help())
+    } else {
+        help_ui::render_command_help_request(args)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = preprocess_cli_args(std::env::args_os().collect());
     let command_display = error_ui::display_command(&args);
+    if let Some(help) = render_help_request(&args) {
+        print!("{help}");
+        return;
+    }
     let (pre_parse_output_format, pre_parse_compact) = pre_parse_output_options(&args);
     match ensure_language_selected_before_command(&args).await {
         Ok(true) => {}
@@ -2572,14 +2584,6 @@ async fn main() {
         }
     }
 
-    if help_ui::is_top_level_help_request(&args) {
-        print!("{}", help_ui::render_top_level_help());
-        return;
-    }
-    if let Some(help) = help_ui::render_command_help_request(&args) {
-        print!("{help}");
-        return;
-    }
     if let Some(misuse) = plain_help_misuse(&args) {
         let report = error_ui::report_for_plain_help_error(&command_display, misuse.help_command);
         error_ui::print_report(&report, false);
@@ -3276,7 +3280,7 @@ mod tests {
         first_command_token, is_language_command_request, language_command_can_run_picker,
         language_gate_action, language_required_message, legacy_upload_option_error,
         plain_help_misuse, pre_parse_output_options, pre_parse_requires_cli_config_file,
-        preprocess_cli_args, preprocess_privacy_args,
+        preprocess_cli_args, preprocess_privacy_args, render_help_request,
     };
     use crate::config::{Config, DEFAULT_CUSTOM_URL};
     use crate::output::OutputFormat;
@@ -4206,6 +4210,13 @@ mod tests {
             language_gate_action(&os_args(&["ov", "status"]), false, false),
             LanguageGateAction::ExitNonInteractive
         );
+    }
+
+    #[test]
+    fn canonical_help_renders_before_language_gating() {
+        assert!(render_help_request(&os_args(&["ov", "--help"])).is_some());
+        assert!(render_help_request(&os_args(&["ov", "status", "--help"])).is_some());
+        assert!(render_help_request(&os_args(&["ov", "status"])).is_none());
     }
 
     #[test]
