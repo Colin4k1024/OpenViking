@@ -151,8 +151,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--eval-each-epoch",
-        action="store_true",
-        help="Run held-out eval after every training epoch. Disabled by default.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run held-out eval after every training epoch. Disabled by default; "
+            "use --no-eval-each-epoch to override a launcher default."
+        ),
     )
     parser.add_argument(
         "--skip-final-eval",
