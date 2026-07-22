@@ -1564,6 +1564,12 @@ async def test_tau2_prepare_experience_loader_skill_writes_static_required_skill
         def __init__(self):
             self.writes = []
 
+        async def read_file(self, path):
+            target = tmp_path / path
+            if not target.is_file():
+                raise FileNotFoundError(path)
+            return target.read_text(encoding="utf-8")
+
         async def write_file(self, path, content):
             self.writes.append((path, content))
             target = tmp_path / path
@@ -1618,6 +1624,168 @@ async def test_tau2_prepare_experience_loader_skill_writes_static_required_skill
     assert fake_sandbox.writes
     assert fake_sandbox.writes[0][0] == "skills/experience_loader/SKILL.md"
     assert context_builder.latest_experience_loader_skill_content == content
+
+
+@pytest.mark.asyncio
+async def test_tau2_prepare_experience_loader_skill_skips_identical_content(tmp_path):
+    import benchmark.tau2.train.rollout_executor_vikingbot as module
+
+    skill_path = tmp_path / module.EXPERIENCE_LOADER_SKILL_PATH
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        module._read_experience_loader_template_file("SKILL.md"),
+        encoding="utf-8",
+    )
+
+    class FakeSandbox:
+        def __init__(self):
+            self.writes = []
+
+        async def read_file(self, path):
+            return (tmp_path / path).read_text(encoding="utf-8")
+
+        async def write_file(self, path, content):
+            self.writes.append((path, content))
+            (tmp_path / path).write_text(content, encoding="utf-8")
+
+    fake_sandbox = FakeSandbox()
+
+    class FakeSandboxManager:
+        def get_workspace_path(self, session_key):
+            return tmp_path
+
+        async def get_sandbox(self, session_key):
+            return fake_sandbox
+
+    class FakeAgent:
+        sandbox_manager = FakeSandboxManager()
+        context = SimpleNamespace(workspace=tmp_path)
+
+    await module._prepare_experience_loader_skill(
+        agent=FakeAgent(),
+        session_key=SimpleNamespace(),
+    )
+
+    assert fake_sandbox.writes == []
+
+
+@pytest.mark.asyncio
+async def test_tau2_prepare_experience_loader_skill_replaces_changed_content(tmp_path):
+    import benchmark.tau2.train.rollout_executor_vikingbot as module
+
+    skill_path = tmp_path / module.EXPERIENCE_LOADER_SKILL_PATH
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("old skill", encoding="utf-8")
+
+    class FakeSandbox:
+        def __init__(self):
+            self.writes = []
+
+        async def read_file(self, path):
+            return (tmp_path / path).read_text(encoding="utf-8")
+
+        async def write_file(self, path, content):
+            self.writes.append((path, content))
+            (tmp_path / path).write_text(content, encoding="utf-8")
+
+    fake_sandbox = FakeSandbox()
+
+    class FakeSandboxManager:
+        def get_workspace_path(self, session_key):
+            return tmp_path
+
+        async def get_sandbox(self, session_key):
+            return fake_sandbox
+
+    class FakeAgent:
+        sandbox_manager = FakeSandboxManager()
+        context = SimpleNamespace(workspace=tmp_path)
+
+    await module._prepare_experience_loader_skill(
+        agent=FakeAgent(),
+        session_key=SimpleNamespace(),
+    )
+
+    expected = module._read_experience_loader_template_file("SKILL.md")
+    assert fake_sandbox.writes == [(module.EXPERIENCE_LOADER_SKILL_PATH, expected)]
+    assert skill_path.read_text(encoding="utf-8") == expected
+
+
+@pytest.mark.asyncio
+async def test_tau2_prepare_experience_loader_skill_serializes_worker_thread_installs(tmp_path):
+    import benchmark.tau2.train.rollout_executor_vikingbot as module
+
+    class FakeSandbox:
+        def __init__(self):
+            self.writes = []
+
+        async def read_file(self, path):
+            target = tmp_path / path
+            if not target.is_file():
+                await asyncio.sleep(0.05)
+                if not target.is_file():
+                    raise FileNotFoundError(path)
+            return target.read_text(encoding="utf-8")
+
+        async def write_file(self, path, content):
+            self.writes.append((path, content))
+            target = tmp_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+    fake_sandbox = FakeSandbox()
+
+    class FakeSandboxManager:
+        def get_workspace_path(self, session_key):
+            return tmp_path
+
+        async def get_sandbox(self, session_key):
+            return fake_sandbox
+
+    class FakeAgent:
+        sandbox_manager = FakeSandboxManager()
+        context = SimpleNamespace(workspace=tmp_path)
+
+    def prepare_in_worker_thread():
+        asyncio.run(
+            module._prepare_experience_loader_skill(
+                agent=FakeAgent(),
+                session_key=SimpleNamespace(),
+            )
+        )
+
+    await asyncio.gather(*(asyncio.to_thread(prepare_in_worker_thread) for _ in range(8)))
+
+    assert len(fake_sandbox.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_tau2_prepare_experience_loader_skill_rejects_unverified_content(tmp_path):
+    import benchmark.tau2.train.rollout_executor_vikingbot as module
+
+    class FakeSandbox:
+        async def read_file(self, path):
+            return "corrupted skill"
+
+        async def write_file(self, path, content):
+            return None
+
+    class FakeSandboxManager:
+        def get_workspace_path(self, session_key):
+            return tmp_path
+
+        async def get_sandbox(self, session_key):
+            return FakeSandbox()
+
+    class FakeAgent:
+        sandbox_manager = FakeSandboxManager()
+        context = SimpleNamespace(workspace=tmp_path)
+
+    with pytest.raises(RuntimeError, match="experience_loader skill verification failed"):
+        await module._prepare_experience_loader_skill(
+            agent=FakeAgent(),
+            session_key=SimpleNamespace(),
+        )
 
 
 @pytest.mark.asyncio
@@ -1915,7 +2083,11 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
     )
 
     assert observed["sandbox_writes"][0][0] == "skills/experience_loader/SKILL.md"
-    assert observed["sandbox_reads"] == ["skills/experience_loader/SKILL.md"]
+    assert observed["sandbox_reads"] == [
+        "skills/experience_loader/SKILL.md",  # install-time comparison
+        "skills/experience_loader/SKILL.md",  # post-write verification
+        "skills/experience_loader/SKILL.md",  # required agent-visible read
+    ]
     assert read_call_index < tool_result_index
     assert "search_experience" in messages[tool_result_index]["content"]
     assert "read_experience" in messages[tool_result_index]["content"]

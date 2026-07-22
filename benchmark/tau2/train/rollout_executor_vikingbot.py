@@ -8,6 +8,7 @@ import json
 import os
 import posixpath
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1376,6 +1377,7 @@ def _build_system_prompt(
 
 EXPERIENCE_LOADER_TEMPLATE_DIR = Path(__file__).resolve().parent / "experience_loader_template"
 EXPERIENCE_LOADER_SKILL_PATH = "skills/experience_loader/SKILL.md"
+_EXPERIENCE_LOADER_SKILL_LOCK = threading.Lock()
 
 
 async def _prepare_experience_loader_skill(
@@ -1398,21 +1400,16 @@ async def _prepare_experience_loader_skill(
         else agent.context.workspace
     )
     skill_content = _read_experience_loader_template_file("SKILL.md")
-    if sandbox_manager:
-        try:
-            sandbox = await sandbox_manager.get_sandbox(session_key)
-            await sandbox.write_file(EXPERIENCE_LOADER_SKILL_PATH, skill_content)
-        except Exception as exc:
-            logger.warning("failed to write experience_loader skill to sandbox: %s", exc)
-            _write_experience_loader_files(
-                workspace_path=workspace_path,
-                skill_content=skill_content,
-            )
-    else:
-        _write_experience_loader_files(
+    await asyncio.to_thread(_EXPERIENCE_LOADER_SKILL_LOCK.acquire)
+    try:
+        await _install_experience_loader_skill(
+            sandbox_manager=sandbox_manager,
+            session_key=session_key,
             workspace_path=workspace_path,
             skill_content=skill_content,
         )
+    finally:
+        _EXPERIENCE_LOADER_SKILL_LOCK.release()
 
     context_builder = imports["ContextBuilder"](
         workspace_path,
@@ -1422,6 +1419,48 @@ async def _prepare_experience_loader_skill(
     )
     context_builder.latest_experience_loader_skill_content = skill_content
     return context_builder
+
+
+async def _install_experience_loader_skill(
+    *,
+    sandbox_manager: Any,
+    session_key: Any,
+    workspace_path: Path,
+    skill_content: str,
+) -> None:
+    sandbox = None
+    if sandbox_manager:
+        try:
+            sandbox = await sandbox_manager.get_sandbox(session_key)
+            try:
+                existing_content = await sandbox.read_file(EXPERIENCE_LOADER_SKILL_PATH)
+            except FileNotFoundError:
+                existing_content = None
+            if existing_content != skill_content:
+                await sandbox.write_file(EXPERIENCE_LOADER_SKILL_PATH, skill_content)
+        except Exception as exc:
+            logger.warning("failed to write experience_loader skill to sandbox: %s", exc)
+            await asyncio.to_thread(
+                _write_experience_loader_files,
+                workspace_path=workspace_path,
+                skill_content=skill_content,
+            )
+    else:
+        await asyncio.to_thread(
+            _write_experience_loader_files,
+            workspace_path=workspace_path,
+            skill_content=skill_content,
+        )
+
+    if sandbox is not None:
+        installed_content = await sandbox.read_file(EXPERIENCE_LOADER_SKILL_PATH)
+    else:
+        installed_content = await asyncio.to_thread(
+            (workspace_path / EXPERIENCE_LOADER_SKILL_PATH).read_text,
+            encoding="utf-8",
+        )
+    if installed_content != skill_content:
+        raise RuntimeError("experience_loader skill verification failed")
 
 
 def _append_runtime_case_context(
@@ -1454,7 +1493,12 @@ def _write_experience_loader_files(
 ) -> None:
     skill_dir = workspace_path / "skills" / "experience_loader"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_dir.joinpath("SKILL.md").write_text(skill_content, encoding="utf-8")
+    skill_path = skill_dir / "SKILL.md"
+    existing_content = skill_path.read_text(encoding="utf-8") if skill_path.is_file() else None
+    if existing_content != skill_content:
+        skill_path.write_text(skill_content, encoding="utf-8")
+    if skill_path.read_text(encoding="utf-8") != skill_content:
+        raise RuntimeError("experience_loader skill verification failed")
 
 
 async def _execute_required_experience_loader_read(
