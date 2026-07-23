@@ -496,3 +496,4 @@ class TestBuildConfig:
         assert call_kwargs.get("api_key") == "key"
         if _HTTP_RETRY_AVAILABLE:
             assert "http_options" in call_kwargs
+            assert call_kwargs["http_options"].retry_options.attempts == 1

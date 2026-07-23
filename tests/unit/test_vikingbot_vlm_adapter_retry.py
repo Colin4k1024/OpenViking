@@ -2,10 +2,10 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-import vikingbot.providers.vlm_adapter as vlm_adapter
 from vikingbot.providers.vlm_adapter import VLMProviderAdapter
 from volcenginesdkarkruntime._exceptions import ArkRateLimitError
 
+import openviking.utils.model_retry as model_retry
 from openviking.utils.model_retry import (
     is_retryable_rate_limit_error,
 )
@@ -69,19 +69,10 @@ class _FakeStreamingVLM:
 
 
 @pytest.mark.asyncio
-async def test_chat_retries_rate_limit_until_success(monkeypatch):
-    sleep_delays: list[float] = []
-
-    async def _sleep(delay: float):
-        sleep_delays.append(delay)
-
-    monkeypatch.setattr(vlm_adapter, "rate_limit_retry_delay", lambda attempt: attempt)
-    monkeypatch.setattr(vlm_adapter.asyncio, "sleep", _sleep)
-
+async def test_chat_delegates_rate_limit_retry_to_vlm_backend():
     fake_vlm = _FakeVLM(
         [
             RuntimeError("Error code: 429 - ModelAccountTpmRateLimitExceeded"),
-            RuntimeError("TooManyRequests: rate limit"),
         ],
         result="done",
     )
@@ -89,19 +80,13 @@ async def test_chat_retries_rate_limit_until_success(monkeypatch):
 
     response = await adapter.chat(messages=[{"role": "user", "content": "hello"}])
 
-    assert response.content == "done"
-    assert response.finish_reason == "stop"
-    assert fake_vlm.calls == 3
-    assert sleep_delays == [1, 2]
+    assert response.finish_reason == "error"
+    assert "ModelAccountTpmRateLimitExceeded" in response.content
+    assert fake_vlm.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_chat_does_not_retry_errors_without_rate_limit_markers(monkeypatch):
-    async def _sleep(_delay: float):
-        raise AssertionError("non-retryable errors must not sleep/retry")
-
-    monkeypatch.setattr(vlm_adapter.asyncio, "sleep", _sleep)
-
+async def test_chat_does_not_retry_errors_without_rate_limit_markers():
     fake_vlm = _FakeVLM([RuntimeError("AuthenticationError Unauthorized")])
     adapter = VLMProviderAdapter(fake_vlm, "test-model", langfuse_client=_DisabledLangfuse())
 
@@ -119,8 +104,8 @@ async def test_chat_stream_retries_rate_limit_until_success(monkeypatch):
     async def _sleep(delay: float):
         sleep_delays.append(delay)
 
-    monkeypatch.setattr(vlm_adapter, "rate_limit_retry_delay", lambda attempt: attempt)
-    monkeypatch.setattr(vlm_adapter.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(model_retry, "rate_limit_retry_delay", lambda attempt: attempt)
+    monkeypatch.setattr(model_retry.asyncio, "sleep", _sleep)
 
     chunk = SimpleNamespace(
         usage=None,

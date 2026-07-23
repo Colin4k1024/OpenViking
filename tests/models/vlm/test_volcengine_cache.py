@@ -123,3 +123,47 @@ async def test_async_completion_traces_readable_request_without_mutating_sdk_mes
         "=== End Messages ==="
     )
     trace_info.assert_any_call('tools: ["read"]')
+
+
+@pytest.mark.asyncio
+async def test_async_completion_keeps_retrying_rate_limits_past_max_retries() -> None:
+    vlm = VLMClass(
+        {
+            "model": "test-model",
+            "api_key": "test-key",
+            "max_retries": 1,
+        }
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="done", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+    create = AsyncMock(
+        side_effect=[
+            RuntimeError("Error code: 429 - RequestBurstTooFast"),
+            RuntimeError("Error code: 429 - ServerOverloaded"),
+            RuntimeError("Error code: 429 - TooManyRequests"),
+            response,
+        ]
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        )
+    )
+
+    with (
+        patch.object(vlm, "get_async_client", return_value=client),
+        patch.object(vlm, "_update_token_usage_from_response"),
+        patch("openviking.utils.model_retry.rate_limit_retry_delay", return_value=0),
+        patch("openviking.utils.model_retry.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        result = await vlm.get_completion_async(prompt="hello")
+
+    assert result == "done"
+    assert create.await_count == 4

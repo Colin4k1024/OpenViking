@@ -64,6 +64,7 @@ class TestVoyageDenseEmbedder:
             model_name="voyage-4-lite",
             api_key="voyage-key",
         )
+        assert mock_openai_class.call_args.kwargs["max_retries"] == 0
         result = embedder.embed("Hello world")
 
         assert result.dense_vector is not None

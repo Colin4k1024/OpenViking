@@ -5,18 +5,18 @@ from __future__ import annotations
 import importlib
 import json
 import os
-import time
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
 from uuid import uuid4
 
-from openviking.utils.model_retry import is_retryable_rate_limit_error, rate_limit_retry_delay
+from openviking.utils.model_retry import retry_model_call_sync
 from openviking_cli.utils import get_logger
 
 logger = get_logger(__name__)
 
 DEFAULT_TAU2_USER_LLM = "openai/doubao-seed-2-0-code-preview-260215"
+_TAU2_MODEL_MAX_RETRIES = 3
 
 _TAU2_GENERATE_REFERENCE_MODULES = (
     "tau2.agent.llm_agent",
@@ -26,36 +26,18 @@ _TAU2_GENERATE_REFERENCE_MODULES = (
 )
 
 
-def _is_tau2_retryable_rate_limit_error(exc: BaseException) -> bool:
-    return is_retryable_rate_limit_error(exc)
-
-
-def _tau2_rate_limit_retry_delay(attempt: int) -> float:
-    return rate_limit_retry_delay(attempt)
-
-
 def _wrap_tau2_generate_with_rate_limit_retry(generate: Callable[..., Any]) -> Callable[..., Any]:
     if getattr(generate, "_openviking_tau2_rate_limit_retry", False):
         return generate
 
     @wraps(generate)
     def generate_with_rate_limit_retry(*args: Any, **kwargs: Any) -> Any:
-        attempt = 1
-        while True:
-            try:
-                return generate(*args, **kwargs)
-            except Exception as exc:
-                if not _is_tau2_retryable_rate_limit_error(exc):
-                    raise
-                delay = _tau2_rate_limit_retry_delay(attempt)
-                logger.warning(
-                    "tau2 LiteLLM generate rate limited; retrying attempt=%d delay=%.1fs error=%s",
-                    attempt,
-                    delay,
-                    exc,
-                )
-                time.sleep(delay)
-                attempt += 1
+        return retry_model_call_sync(
+            lambda: generate(*args, **kwargs),
+            max_retries=_TAU2_MODEL_MAX_RETRIES,
+            logger=logger,
+            operation_name="tau2 LiteLLM generate",
+        )
 
     generate_with_rate_limit_retry._openviking_tau2_rate_limit_retry = True
     generate_with_rate_limit_retry._openviking_original_generate = generate

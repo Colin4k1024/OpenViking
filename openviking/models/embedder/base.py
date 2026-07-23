@@ -19,8 +19,8 @@ from openviking.utils.exceptions import AllCredentialsFailedError
 from openviking.utils.model_retry import (
     OrderedCredentialSwitcher,
     classify_api_error,
-    retry_async,
-    retry_sync,
+    retry_model_call_async,
+    retry_model_call_sync,
 )
 from openviking_cli.utils import get_logger
 
@@ -308,7 +308,7 @@ class EmbedderBase(ABC):
             finally:
                 self._active_call_started_at = previous_started_at
 
-        return retry_sync(
+        return retry_model_call_sync(
             _wrapped,
             max_retries=self.max_retries,
             logger=logger,
@@ -351,7 +351,7 @@ class EmbedderBase(ABC):
                 self._active_call_started_at = previous_started_at
                 semaphore.release()
 
-        return await retry_async(
+        return await retry_model_call_async(
             _wrapped,
             max_retries=self.max_retries,
             logger=logger,

@@ -37,6 +37,42 @@ async def _marker_exists(session, archive_uri: str, name: str) -> bool:
         return False
 
 
+def test_phase2_does_not_retry_exhausted_model_call():
+    import openviking.session.session as session_module
+    from openviking.utils.model_retry import ModelRetryExhaustedError
+
+    error = ModelRetryExhaustedError(
+        "memory extraction model call",
+        4,
+        RuntimeError("Error code: 503 - service unavailable"),
+    )
+
+    assert not session_module._is_retryable_phase2_error(error)
+
+
+def test_phase2_does_not_retry_wrapped_exhausted_model_call():
+    import openviking.session.session as session_module
+    from openviking.utils.model_retry import ModelRetryExhaustedError
+
+    exhausted = ModelRetryExhaustedError(
+        "embedding model call",
+        4,
+        RuntimeError("Error code: 503 - service unavailable"),
+    )
+    wrapped = RuntimeError(f"Embedding failed: {exhausted}")
+    wrapped.__cause__ = exhausted
+
+    assert not session_module._is_retryable_phase2_error(wrapped)
+
+
+def test_phase2_still_retries_other_transient_errors():
+    import openviking.session.session as session_module
+
+    assert session_module._is_retryable_phase2_error(
+        RuntimeError("Error code: 503 - service unavailable")
+    )
+
+
 class TestCommit:
     """Test commit"""
 
@@ -120,9 +156,7 @@ class TestCommit:
         session_with_messages._session_compressor.extract_long_term_memories.assert_not_awaited()
         if hasattr(session_with_messages._session_compressor, "extract_execution_memories"):
             session_with_messages._session_compressor.extract_execution_memories.assert_awaited_once()
-            call_kwargs = (
-                session_with_messages._session_compressor.extract_execution_memories.call_args.kwargs
-            )
+            call_kwargs = session_with_messages._session_compressor.extract_execution_memories.call_args.kwargs
             assert call_kwargs["allowed_memory_types"] == {"trajectories"}
             assert call_kwargs["include_session_skills"] is True
 
@@ -184,9 +218,7 @@ class TestCommit:
         session_with_messages._session_compressor.extract_long_term_memories.assert_awaited_once()
         if hasattr(session_with_messages._session_compressor, "extract_execution_memories"):
             session_with_messages._session_compressor.extract_execution_memories.assert_awaited_once()
-            call_kwargs = (
-                session_with_messages._session_compressor.extract_execution_memories.call_args.kwargs
-            )
+            call_kwargs = session_with_messages._session_compressor.extract_execution_memories.call_args.kwargs
             assert call_kwargs["include_session_skills"] is False
 
     async def test_commit_can_skip_working_memory_summary(

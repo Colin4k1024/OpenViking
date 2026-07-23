@@ -34,7 +34,11 @@ from openviking.session.tool_result_synopsis import (
 )
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
-from openviking.utils.model_retry import is_retryable_api_error, retry_async
+from openviking.utils.model_retry import (
+    is_model_retry_exhausted_error,
+    is_retryable_api_error,
+    retry_async,
+)
 from openviking.utils.time_utils import get_current_timestamp
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import FailedPreconditionError
@@ -54,6 +58,12 @@ _PHASE2_QUEUE_WAIT_TIMEOUT_SECONDS = 1800.0
 _MEMORY_EXTRACTION_MAX_RETRIES = 3
 _MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS = 1.0
 _MEMORY_EXTRACTION_RETRY_MAX_DELAY_SECONDS = 8.0
+
+
+def _is_retryable_phase2_error(error: Exception) -> bool:
+    if is_model_retry_exhausted_error(error):
+        return False
+    return is_retryable_api_error(error)
 
 
 def _wm_debug(msg: str) -> None:
@@ -1382,7 +1392,7 @@ class Session:
                             max_retries=_MEMORY_EXTRACTION_MAX_RETRIES,
                             base_delay=_MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS,
                             max_delay=_MEMORY_EXTRACTION_RETRY_MAX_DELAY_SECONDS,
-                            is_retryable=is_retryable_api_error,
+                            is_retryable=_is_retryable_phase2_error,
                             logger=logger,
                             operation_name=operation_name,
                         )

@@ -31,6 +31,18 @@ class TestExtraHeadersDirectConstruction:
     """Test extra_headers behaviour when constructing OpenAIDenseEmbedder directly."""
 
     @patch("openviking.models.embedder.openai_embedders.openai.OpenAI")
+    def test_openai_sdk_retries_are_disabled(self, mock_openai_class):
+        mock_openai_class.return_value = _make_mock_client()
+
+        OpenAIDenseEmbedder(
+            model_name="text-embedding-3-small",
+            api_key="sk-test",
+            dimension=8,
+        )
+
+        assert mock_openai_class.call_args.kwargs["max_retries"] == 0
+
+    @patch("openviking.models.embedder.openai_embedders.openai.OpenAI")
     def test_extra_headers_passed_as_default_headers(self, mock_openai_class):
         """extra_headers dict must arrive as default_headers kwarg in openai.OpenAI()."""
         mock_openai_class.return_value = _make_mock_client()

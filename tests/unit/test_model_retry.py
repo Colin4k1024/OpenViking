@@ -11,8 +11,12 @@ from openviking.utils.model_retry import (
     ERROR_CLASS_PERMANENT,
     ERROR_CLASS_QUOTA_EXCEEDED,
     ERROR_CLASS_TRANSIENT,
+    ModelRetryExhaustedError,
     classify_api_error,
+    rate_limit_retry_delay,
     retry_async,
+    retry_model_call_async,
+    retry_model_call_sync,
     retry_sync,
 )
 
@@ -44,6 +48,91 @@ async def test_retry_async_does_not_retry_unknown_error():
 
     with pytest.raises(RuntimeError):
         await retry_async(_call, max_retries=3)
+
+    assert attempts["count"] == 1
+
+
+def test_retry_model_call_sync_retries_rate_limit_without_attempt_limit(monkeypatch):
+    attempts = {"count": 0}
+    delays: list[float] = []
+
+    def _call():
+        attempts["count"] += 1
+        if attempts["count"] <= 5:
+            raise RuntimeError("Error code: 429 - RequestBurstTooFast")
+        return "ok"
+
+    monkeypatch.setattr(
+        "openviking.utils.model_retry.rate_limit_retry_delay",
+        lambda attempt: float(attempt),
+    )
+    monkeypatch.setattr(
+        "openviking.utils.model_retry.time.sleep",
+        lambda delay: delays.append(delay),
+    )
+
+    assert retry_model_call_sync(_call, max_retries=1) == "ok"
+    assert attempts["count"] == 6
+    assert delays == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_rate_limit_retry_delay_never_exceeds_maximum(monkeypatch):
+    monkeypatch.setattr("openviking.utils.model_retry.random.uniform", lambda _low, _high: 1.2)
+
+    assert rate_limit_retry_delay(100) == 120.0
+
+
+@pytest.mark.asyncio
+async def test_retry_model_call_async_retries_rate_limit_without_attempt_limit(monkeypatch):
+    attempts = {"count": 0}
+    delays: list[float] = []
+
+    async def _call():
+        attempts["count"] += 1
+        if attempts["count"] <= 5:
+            raise RuntimeError("Error code: 429 - ServerOverloaded")
+        return "ok"
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        "openviking.utils.model_retry.rate_limit_retry_delay",
+        lambda attempt: float(attempt),
+    )
+    monkeypatch.setattr("openviking.utils.model_retry.asyncio.sleep", _sleep)
+
+    assert await retry_model_call_async(_call, max_retries=1) == "ok"
+    assert attempts["count"] == 6
+    assert delays == [1.0, 2.0, 3.0, 4.0, 5.0]
+
+
+def test_retry_model_call_sync_wraps_exhausted_non_rate_limit_transient(monkeypatch):
+    attempts = {"count": 0}
+
+    def _call():
+        attempts["count"] += 1
+        raise RuntimeError("Error code: 503 - service unavailable")
+
+    monkeypatch.setattr("openviking.utils.model_retry.time.sleep", lambda _delay: None)
+
+    with pytest.raises(ModelRetryExhaustedError, match="service unavailable") as exc_info:
+        retry_model_call_sync(_call, max_retries=2, operation_name="test model call")
+
+    assert attempts["count"] == 3
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_retry_model_call_async_fails_fast_for_permanent_error():
+    attempts = {"count": 0}
+
+    async def _call():
+        attempts["count"] += 1
+        raise RuntimeError("Error code: 400 - invalid parameter")
+
+    with pytest.raises(RuntimeError, match="invalid parameter"):
+        await retry_model_call_async(_call, max_retries=3)
 
     assert attempts["count"] == 1
 

@@ -145,7 +145,7 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
                 api_key=api_key,
                 http_options=HttpOptions(
                     retry_options=HttpRetryOptions(
-                        attempts=max(self.max_retries + 1, 1),
+                        attempts=1,
                         initial_delay=0.5,
                         max_delay=8.0,
                         exp_base=2.0,
@@ -221,14 +221,10 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             return EmbedResult(dense_vector=vector)
 
         try:
-            result = (
-                _call()
-                if _HTTP_RETRY_AVAILABLE
-                else self._run_with_retry(
-                    _call,
-                    logger=logger,
-                    operation_name="Gemini embedding",
-                )
+            result = self._run_with_retry(
+                _call,
+                logger=logger,
+                operation_name="Gemini embedding",
             )
             # Estimate token usage
             estimated_tokens = self._estimate_tokens(text)
@@ -324,14 +320,11 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
                 return response
 
             try:
-                if _HTTP_RETRY_AVAILABLE:
-                    response = _call_batch()
-                else:
-                    response = self._run_with_retry(
-                        _call_batch,
-                        logger=logger,
-                        operation_name="Gemini batch embedding",
-                    )
+                response = self._run_with_retry(
+                    _call_batch,
+                    logger=logger,
+                    operation_name="Gemini batch embedding",
+                )
                 batch_results = [None] * len(batch)
                 for j, emb in zip(non_empty_indices, response.embeddings, strict=True):
                     batch_results[j] = EmbedResult(

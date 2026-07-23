@@ -4,6 +4,7 @@
 
 import os
 import unittest
+from unittest.mock import MagicMock, patch
 
 from openviking.models.embedder.minimax_embedders import MinimaxDenseEmbedder
 from openviking_cli.utils.config.embedding_config import EmbeddingModelConfig
@@ -47,6 +48,35 @@ class TestMinimaxRealCall(unittest.TestCase):
 
 
 class TestEmbeddingModelConfig(unittest.TestCase):
+    @patch("openviking.utils.model_retry.time.sleep")
+    def test_minimax_sync_embed_uses_unbounded_rate_limit_retry(self, _mock_sleep):
+        embedder = object.__new__(MinimaxDenseEmbedder)
+        embedder.max_retries = 1
+        embedder._active_call_started_at = None
+        embedder.model_name = "embo-01"
+        embedder._call_api = MagicMock(
+            side_effect=[
+                RuntimeError("Error code: 429 - RequestBurstTooFast"),
+                RuntimeError("Error code: 429 - ServerOverloaded"),
+                [[0.1, 0.2, 0.3]],
+            ]
+        )
+        embedder._estimate_tokens = MagicMock(return_value=1)
+        embedder.update_token_usage = MagicMock()
+
+        result = embedder.embed("hello")
+
+        self.assertEqual(result.dense_vector, [0.1, 0.2, 0.3])
+        self.assertEqual(embedder._call_api.call_count, 3)
+
+    def test_minimax_sdk_retries_are_disabled(self):
+        embedder = object.__new__(MinimaxDenseEmbedder)
+        embedder.max_retries = 3
+
+        session = embedder._create_session()
+
+        self.assertEqual(session.adapters["https://"].max_retries.total, 0)
+
     def test_minimax_provider_valid(self):
         config = EmbeddingModelConfig(provider="minimax", model="embo-01", api_key="test-key")
         self.assertEqual(config.provider, "minimax")

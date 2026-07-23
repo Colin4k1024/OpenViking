@@ -209,6 +209,35 @@ class TestVLMExtraHeaders:
 class TestOpenAIVLMClientRetries:
     """Test OpenAI SDK retries are disabled in favor of OpenViking retries."""
 
+    @patch("openviking.utils.model_retry.time.sleep")
+    @patch("openviking.models.vlm.backends.openai_vlm.openai.OpenAI")
+    def test_openai_sync_completion_uses_unbounded_rate_limit_retry(
+        self,
+        mock_openai_class,
+        _mock_sleep,
+    ):
+        response = MagicMock()
+        response.choices[0].message.content = "done"
+        response.usage = None
+        create = MagicMock(
+            side_effect=[
+                RuntimeError("Error code: 429 - RequestBurstTooFast"),
+                RuntimeError("Error code: 429 - ServerOverloaded"),
+                response,
+            ]
+        )
+        mock_openai_class.return_value.chat.completions.create = create
+        vlm = OpenAIVLM(
+            {
+                "api_key": "sk-test",
+                "api_base": "https://api.openai.com/v1",
+                "max_retries": 1,
+            }
+        )
+
+        assert vlm.get_completion("hello") == "done"
+        assert create.call_count == 3
+
     @patch("openviking.models.vlm.backends.openai_vlm.openai.OpenAI")
     def test_openai_sync_client_disables_sdk_retries(self, mock_openai_class):
         mock_openai_class.return_value = MagicMock()
@@ -280,6 +309,46 @@ class TestOpenAIVLMClientRetries:
         assert result == [(worker_loop_client, worker_loop_client)]
         assert mock_async_openai_class.call_count == 2
 
+
+class TestLiteLLMVLMRetries:
+    def test_build_kwargs_disables_litellm_retries(self):
+        vlm = LiteLLMVLMProvider(
+            {
+                "model": "openai/test-model",
+                "api_key": "sk-test",
+            }
+        )
+
+        assert vlm._build_text_kwargs(prompt="hello")["num_retries"] == 0
+
+    @patch("openviking.utils.model_retry.time.sleep")
+    @patch("openviking.models.vlm.backends.litellm_vlm.completion")
+    def test_sync_completion_uses_unbounded_rate_limit_retry(
+        self,
+        mock_completion,
+        _mock_sleep,
+    ):
+        response = MagicMock()
+        response.choices[0].message.content = "done"
+        response.usage = None
+        mock_completion.side_effect = [
+            RuntimeError("Error code: 429 - RequestBurstTooFast"),
+            RuntimeError("Error code: 429 - ServerOverloaded"),
+            response,
+        ]
+        vlm = LiteLLMVLMProvider(
+            {
+                "model": "openai/test-model",
+                "api_key": "sk-test",
+                "max_retries": 1,
+            }
+        )
+
+        assert vlm.get_completion("hello") == "done"
+        assert mock_completion.call_count == 3
+
+
+class TestVLMProviderClientRetries:
     def test_volcengine_async_client_is_scoped_to_event_loop(self, monkeypatch):
         main_loop_client = MagicMock(name="main_loop_client")
         worker_loop_client = MagicMock(name="worker_loop_client")

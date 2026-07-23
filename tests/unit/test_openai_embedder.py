@@ -10,6 +10,33 @@ from openviking.models.embedder import OpenAIDenseEmbedder
 class TestOpenAIDenseEmbedder:
     """Test cases for OpenAIDenseEmbedder"""
 
+    @patch("openviking.utils.model_retry.time.sleep")
+    @patch("openviking.models.embedder.openai_embedders.openai.OpenAI")
+    def test_embed_uses_unbounded_rate_limit_retry(self, mock_openai_class, _mock_sleep):
+        mock_embedding = MagicMock()
+        mock_embedding.embedding = [0.1] * 3
+        mock_response = MagicMock()
+        mock_response.data = [mock_embedding]
+        create = MagicMock(
+            side_effect=[
+                RuntimeError("Error code: 429 - RequestBurstTooFast"),
+                RuntimeError("Error code: 429 - ServerOverloaded"),
+                mock_response,
+            ]
+        )
+        mock_openai_class.return_value.embeddings.create = create
+        embedder = OpenAIDenseEmbedder(
+            model_name="text-embedding-3-small",
+            api_key="test-api-key",
+            dimension=3,
+            config={"max_retries": 1},
+        )
+
+        result = embedder.embed("Hello world")
+
+        assert result.dense_vector == [0.1] * 3
+        assert create.call_count == 3
+
     @patch("openviking.models.embedder.openai_embedders.openai.OpenAI")
     def test_embed_does_not_send_dimensions(self, mock_openai_class):
         """OpenAI embed should omit dimensions param"""

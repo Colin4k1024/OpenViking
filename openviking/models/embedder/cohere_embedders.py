@@ -135,7 +135,11 @@ class CohereDenseEmbedder(DenseEmbedderBase):
     def embed(self, text: str, is_query: bool = False) -> EmbedResult:
         input_type = "search_query" if is_query else "search_document"
         try:
-            vectors = self._call_api([text], input_type)
+            vectors = self._run_with_retry(
+                lambda: self._call_api([text], input_type),
+                logger=logger,
+                operation_name="Cohere embedding",
+            )
             result = EmbedResult(dense_vector=self._normalize_vector(vectors[0]))
             # Estimate token usage
             estimated_tokens = self._estimate_tokens(text)
@@ -185,12 +189,21 @@ class CohereDenseEmbedder(DenseEmbedderBase):
         if not texts:
             return []
         input_type = "search_query" if is_query else "search_document"
-        try:
+
+        def _call() -> List[EmbedResult]:
             results: List[EmbedResult] = []
             for i in range(0, len(texts), 96):
                 batch = texts[i : i + 96]
                 vectors = self._call_api(batch, input_type)
                 results.extend(EmbedResult(dense_vector=self._normalize_vector(v)) for v in vectors)
+            return results
+
+        try:
+            results = self._run_with_retry(
+                _call,
+                logger=logger,
+                operation_name="Cohere batch embedding",
+            )
             # Estimate token usage for batch
             total_tokens = sum(self._estimate_tokens(text) for text in texts)
             self.update_token_usage(

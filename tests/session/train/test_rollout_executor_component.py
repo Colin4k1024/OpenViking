@@ -392,6 +392,7 @@ def test_tau2_evaluation_ignores_malformed_optional_components():
 
 def test_tau2_litellm_generate_rate_limit_retry_patch(monkeypatch):
     import benchmark.tau2.common.tau2_env.tau2_environment as tau2_environment
+    import openviking.utils.model_retry as model_retry
 
     calls = {"count": 0}
     sleeps = []
@@ -419,8 +420,8 @@ def test_tau2_litellm_generate_rate_limit_retry_patch(monkeypatch):
         raise ImportError(name)
 
     monkeypatch.setattr(tau2_environment.importlib, "import_module", fake_import_module)
-    monkeypatch.setattr(tau2_environment, "_tau2_rate_limit_retry_delay", lambda attempt: attempt)
-    monkeypatch.setattr(tau2_environment.time, "sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr(model_retry, "rate_limit_retry_delay", lambda attempt: attempt)
+    monkeypatch.setattr(model_retry.time, "sleep", lambda delay: sleeps.append(delay))
 
     tau2_environment._install_tau2_litellm_rate_limit_retry()
 
@@ -432,6 +433,7 @@ def test_tau2_litellm_generate_rate_limit_retry_patch(monkeypatch):
 
 def test_tau2_litellm_generate_retry_patch_does_not_retry_non_rate_limit(monkeypatch):
     import benchmark.tau2.common.tau2_env.tau2_environment as tau2_environment
+    import openviking.utils.model_retry as model_retry
 
     calls = {"count": 0}
 
@@ -452,13 +454,42 @@ def test_tau2_litellm_generate_retry_patch_does_not_retry_non_rate_limit(monkeyp
     def fail_on_sleep(_delay):
         raise AssertionError("unexpected sleep")
 
-    monkeypatch.setattr(tau2_environment.time, "sleep", fail_on_sleep)
+    monkeypatch.setattr(model_retry.time, "sleep", fail_on_sleep)
 
     tau2_environment._install_tau2_litellm_rate_limit_retry()
 
     with pytest.raises(RuntimeError, match="AuthenticationError"):
         FakeLLMUtils.generate()
     assert calls["count"] == 1
+
+
+def test_tau2_litellm_generate_retry_patch_bounds_other_transient_errors(monkeypatch):
+    import benchmark.tau2.common.tau2_env.tau2_environment as tau2_environment
+    import openviking.utils.model_retry as model_retry
+    from openviking.utils.model_retry import ModelRetryExhaustedError
+
+    calls = {"count": 0}
+
+    def fake_generate():
+        calls["count"] += 1
+        raise RuntimeError("Error code: 503 - service unavailable")
+
+    class FakeLLMUtils:
+        generate = staticmethod(fake_generate)
+
+    def fake_import_module(name):
+        if name == "tau2.utils.llm_utils":
+            return FakeLLMUtils
+        raise ImportError(name)
+
+    monkeypatch.setattr(tau2_environment.importlib, "import_module", fake_import_module)
+    monkeypatch.setattr(model_retry.time, "sleep", lambda _delay: None)
+
+    tau2_environment._install_tau2_litellm_rate_limit_retry()
+
+    with pytest.raises(ModelRetryExhaustedError, match="service unavailable"):
+        FakeLLMUtils.generate()
+    assert calls["count"] == 4
 
 
 def test_tau2_native_env_reward_handles_required_id_and_tool_call_ids(monkeypatch):

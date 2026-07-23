@@ -12,6 +12,29 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+
+class ModelRetryExhaustedError(RuntimeError):
+    """A model call exhausted its bounded transient-error retry budget."""
+
+    def __init__(self, operation_name: str, attempts: int, error: Exception):
+        super().__init__(f"{operation_name} failed after {attempts} attempts: {error}")
+        self.operation_name = operation_name
+        self.attempts = attempts
+        self.original_error = error
+
+
+def is_model_retry_exhausted_error(error: BaseException) -> bool:
+    """Return whether an exception chain contains a model retry exhaustion."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ModelRetryExhaustedError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 # Error classification categories returned by classify_api_error()
 ERROR_CLASS_PERMANENT = "permanent"  # request-level 4xx (e.g. 400 invalid parameter)
 ERROR_CLASS_AUTH = "auth"  # credential-level 401/403 (key invalid / no permission / overdue)
@@ -91,6 +114,8 @@ RETRYABLE_RATE_LIMIT_MARKERS = (
     "TooManyRequests",
     "RateLimitExceeded",
     "ModelAccountTpmRateLimitExceeded",
+    "RequestBurstTooFast",
+    "ServerOverloaded",
     "TPM (Tokens Per Minute) limit",
     "RPM (Requests Per Minute) limit",
     "rate limit",
@@ -295,7 +320,149 @@ def rate_limit_retry_delay(attempt: int) -> float:
         RATE_LIMIT_RETRY_MAX_DELAY_SECONDS,
         RATE_LIMIT_RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1)),
     )
-    return delay * random.uniform(0.8, 1.2)
+    return min(RATE_LIMIT_RETRY_MAX_DELAY_SECONDS, delay * random.uniform(0.8, 1.2))
+
+
+def retry_model_call_sync(
+    func: Callable[[], T],
+    *,
+    max_retries: int,
+    base_delay: float = 0.5,
+    max_delay: float = 8.0,
+    jitter: bool = True,
+    logger=None,
+    operation_name: str = "model call",
+) -> T:
+    """Run a model call with unbounded rate-limit and bounded transient retries."""
+    transient_attempt = 0
+    rate_limit_attempt = 0
+
+    while True:
+        try:
+            return func()
+        except Exception as error:
+            error_class = classify_api_error(error)
+            if error_class in {
+                ERROR_CLASS_PERMANENT,
+                ERROR_CLASS_AUTH,
+                ERROR_CLASS_CONTENT_SAFETY,
+                ERROR_CLASS_INPUT_TOO_LARGE,
+                ERROR_CLASS_QUOTA_EXCEEDED,
+            }:
+                raise
+
+            if is_retryable_rate_limit_error(error):
+                rate_limit_attempt += 1
+                delay = rate_limit_retry_delay(rate_limit_attempt)
+                if logger:
+                    logger.warning(
+                        "%s rate limited (retry %d, no limit): %s; retrying in %.2fs",
+                        operation_name,
+                        rate_limit_attempt,
+                        error,
+                        delay,
+                    )
+                time.sleep(delay)
+                continue
+
+            if error_class != ERROR_CLASS_TRANSIENT:
+                raise
+
+            if max_retries <= 0 or transient_attempt >= max_retries:
+                raise ModelRetryExhaustedError(
+                    operation_name,
+                    transient_attempt + 1,
+                    error,
+                ) from error
+
+            delay = _compute_delay(
+                transient_attempt,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                jitter=jitter,
+            )
+            if logger:
+                logger.warning(
+                    "%s failed with retryable error (retry %d/%d): %s; retrying in %.2fs",
+                    operation_name,
+                    transient_attempt + 1,
+                    max_retries,
+                    error,
+                    delay,
+                )
+            time.sleep(delay)
+            transient_attempt += 1
+
+
+async def retry_model_call_async(
+    func: Callable[[], Awaitable[T]],
+    *,
+    max_retries: int,
+    base_delay: float = 0.5,
+    max_delay: float = 8.0,
+    jitter: bool = True,
+    logger=None,
+    operation_name: str = "model call",
+) -> T:
+    """Run an async model call with unbounded rate-limit and bounded transient retries."""
+    transient_attempt = 0
+    rate_limit_attempt = 0
+
+    while True:
+        try:
+            return await func()
+        except Exception as error:
+            error_class = classify_api_error(error)
+            if error_class in {
+                ERROR_CLASS_PERMANENT,
+                ERROR_CLASS_AUTH,
+                ERROR_CLASS_CONTENT_SAFETY,
+                ERROR_CLASS_INPUT_TOO_LARGE,
+                ERROR_CLASS_QUOTA_EXCEEDED,
+            }:
+                raise
+
+            if is_retryable_rate_limit_error(error):
+                rate_limit_attempt += 1
+                delay = rate_limit_retry_delay(rate_limit_attempt)
+                if logger:
+                    logger.warning(
+                        "%s rate limited (retry %d, no limit): %s; retrying in %.2fs",
+                        operation_name,
+                        rate_limit_attempt,
+                        error,
+                        delay,
+                    )
+                await asyncio.sleep(delay)
+                continue
+
+            if error_class != ERROR_CLASS_TRANSIENT:
+                raise
+
+            if max_retries <= 0 or transient_attempt >= max_retries:
+                raise ModelRetryExhaustedError(
+                    operation_name,
+                    transient_attempt + 1,
+                    error,
+                ) from error
+
+            delay = _compute_delay(
+                transient_attempt,
+                base_delay=base_delay,
+                max_delay=max_delay,
+                jitter=jitter,
+            )
+            if logger:
+                logger.warning(
+                    "%s failed with retryable error (retry %d/%d): %s; retrying in %.2fs",
+                    operation_name,
+                    transient_attempt + 1,
+                    max_retries,
+                    error,
+                    delay,
+                )
+            await asyncio.sleep(delay)
+            transient_attempt += 1
 
 
 def _compute_delay(
