@@ -105,6 +105,7 @@ TRANSIENT_API_ERROR_PATTERNS = (
     "ratelimit",
     "requestbursttoofast",
     "timeout",
+    "timed out",
     "connectionerror",
     "connection refused",
     "connection reset",

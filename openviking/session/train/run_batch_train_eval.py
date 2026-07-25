@@ -30,14 +30,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=200,
-        help="Concurrent rollout executions for train and eval (default: 200)",
+        default=150,
+        help="Concurrent rollout executions for train and eval (default: 150)",
     )
     parser.add_argument(
         "--commit-concurrency",
         type=int,
-        default=200,
-        help="Concurrent OpenViking session.commit submissions during train (default: 200)",
+        default=150,
+        help="Concurrent OpenViking session.commit submissions during train (default: 150)",
     )
     parser.add_argument("--config", default=None, help="ov.conf path (optional)")
     parser.add_argument(

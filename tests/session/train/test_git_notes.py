@@ -16,6 +16,7 @@ from openviking.session.train.components.git_notes import GitNotesPipelineReport
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHERS = (
     REPO_ROOT / "benchmark/tau2/train/restart_vikingbot_train_eval.sh",
+    REPO_ROOT / "benchmark/vaka/train/restart_vikingbot_train_eval.sh",
     REPO_ROOT / "benchmark/alfworld/train/restart_alfworld_train_eval.sh",
     REPO_ROOT / "benchmark/smoke/train/restart_smoke_train_eval.sh",
 )

@@ -137,6 +137,28 @@ async def test_retry_model_call_async_fails_fast_for_permanent_error():
     assert attempts["count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_retry_model_call_async_retries_request_timed_out(monkeypatch):
+    attempts = {"count": 0}
+
+    async def _call():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError(
+                "Request timed out., request_id: "
+                "ToB-direct,OpenViking_Service,openviking-service_cn-beijing"
+            )
+        return "ok"
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("openviking.utils.model_retry.asyncio.sleep", _sleep)
+
+    assert await retry_model_call_async(_call, max_retries=3) == "ok"
+    assert attempts["count"] == 2
+
+
 # --- quota_exceeded classification ---
 
 

@@ -60,7 +60,7 @@ class BatchTrainEvalConfig:
     dataset: str
     epochs: int = 1
     batch_size: int | None = None
-    concurrency: int = 200
+    concurrency: int = 150
     config_path: str | None = None
     output_path: str | None = None
     keep_default_tools: bool = True
@@ -76,7 +76,7 @@ class BatchTrainEvalConfig:
     commit_keep_recent_count: int = 0
     commit_poll_interval_seconds: float = 2.0
     commit_timeout_seconds: float | None = None
-    commit_concurrency: int = 200
+    commit_concurrency: int = 150
     train_split: str = "train"
     train_index: int | str | list[int] | tuple[int, ...] | None = None
     eval_index: int | str | list[int] | tuple[int, ...] | None = None
