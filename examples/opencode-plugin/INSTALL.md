@@ -24,7 +24,7 @@ Collect these up front with your structured question / option-select UI. Do not 
 ## Operating Rules
 
 - Be idempotent. Re-running this document must not damage an existing setup.
-- Do not run the interactive `openviking-server init` wizard. Collect parameters through your question UI and write config files directly.
+- Do not run the interactive `openviking-server init` wizard. Collect parameters through your question UI and write config files directly. Exception: when local server setup fails, `openviking-server init` may be handed to the user as a fallback (see Step 2).
 - Do not overwrite an existing `openviking-config.json` or `ov.conf`; if one exists, stop and ask.
 - Put the API key in the `OPENVIKING_API_KEY` environment variable, not in config files.
 - Do not use `sudo` or install system packages without explicit user approval.
@@ -102,7 +102,7 @@ curl -fsS <BASE_URL>/health
      curl -fsS http://127.0.0.1:1933/health
      ```
 
-     If `doctor` fails, report its output and stop — do not start the server.
+     If `doctor` fails and you cannot fix the config from its output — or the user's provider is not in the table (e.g. Codex OAuth, which needs a browser sign-in) — fall back to the interactive wizard: tell the user to run `openviking-server init` in their own terminal and confirm when it completes, then rerun `doctor` and continue. Do not script or pipe input into the wizard.
 
 ### 3. Install the plugin
 

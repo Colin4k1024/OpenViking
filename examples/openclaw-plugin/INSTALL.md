@@ -29,7 +29,7 @@ Collect these up front with your structured question / option-select UI. Do not 
 
 - Be idempotent. Re-running this document must not damage an existing setup.
 - Pass `--json` to every `openclaw openviking` command and branch on fields; never parse human-oriented output.
-- Do not run interactive wizards (`openclaw openviking setup` without flags, `openviking-server init`). Collect parameters through your question UI, then pass flags or write config files directly.
+- Do not run interactive wizards (`openclaw openviking setup` without flags, `openviking-server init`). Collect parameters through your question UI, then pass flags or write config files directly. Exception: when local server setup fails, `openviking-server init` may be handed to the user as a fallback (see Step 2).
 - Never replace another context engine without explicit user approval.
 - Do not use `sudo` or install system packages without explicit user approval.
 - Do not print, echo, or log API keys.
@@ -108,7 +108,7 @@ curl -fsS <BASE_URL>/health
      curl -fsS http://127.0.0.1:1933/health
      ```
 
-     If `doctor` fails, report its output and stop — do not start the server.
+     If `doctor` fails and you cannot fix the config from its output — or the user's provider is not in the table (e.g. Codex OAuth, which needs a browser sign-in) — fall back to the interactive wizard: tell the user to run `openviking-server init` in their own terminal and confirm when it completes, then rerun `doctor` and continue. Do not script or pipe input into the wizard.
 
 ### 3. Existing state
 
