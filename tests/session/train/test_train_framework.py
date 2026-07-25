@@ -1593,6 +1593,110 @@ async def test_session_commit_policy_trainer_recovers_commit_read_error_from_tas
 
 
 @pytest.mark.asyncio
+async def test_session_commit_policy_trainer_retries_commit_when_no_task_was_created(
+    monkeypatch,
+):
+    import httpx
+
+    from openviking.session.train import SessionCommitPolicyTrainer
+    from openviking.session.train.components import session_commit
+
+    client = FakeSessionCommitClient()
+    attempts = 0
+
+    async def commit_after_transient_read_errors(
+        session_id,
+        telemetry=False,
+        *,
+        keep_recent_count=0,
+    ):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ReadError("response unavailable before task creation")
+        return {
+            "task_id": f"task-{session_id}",
+            "archive_uri": f"viking://archive/task-{session_id}",
+        }
+
+    async def no_recovered_task(_trainer, _session_id):
+        return None
+
+    client.commit_session = commit_after_transient_read_errors
+    monkeypatch.setattr(session_commit, "_retry_delay_seconds", lambda _attempt: 0)
+    monkeypatch.setattr(
+        SessionCommitPolicyTrainer,
+        "_recover_commit_result",
+        no_recovered_task,
+    )
+    trainer = SessionCommitPolicyTrainer(client=client, run_id="run1")
+
+    result = await trainer._commit_session_or_recover("session-1")
+
+    assert attempts == 3
+    assert result["task_id"] == "task-session-1"
+    assert result["archive_uri"] == "viking://archive/task-session-1"
+
+
+@pytest.mark.asyncio
+async def test_session_commit_policy_trainer_recovers_task_after_ambiguous_empty_retry(
+    monkeypatch,
+):
+    import httpx
+
+    from openviking.session.train import SessionCommitPolicyTrainer
+    from openviking.session.train.components import session_commit
+
+    client = FakeSessionCommitClient()
+    commit_attempts = 0
+    recovery_attempts = 0
+
+    async def response_lost_then_empty_session(
+        session_id,
+        telemetry=False,
+        *,
+        keep_recent_count=0,
+    ):
+        nonlocal commit_attempts
+        commit_attempts += 1
+        if commit_attempts == 1:
+            raise httpx.ReadError("response lost after archive")
+        return {
+            "session_id": session_id,
+            "status": "skipped",
+            "task_id": None,
+            "archive_uri": None,
+            "reason": "no_messages",
+        }
+
+    async def recover_task_after_retry(_trainer, session_id):
+        nonlocal recovery_attempts
+        recovery_attempts += 1
+        if recovery_attempts == 1:
+            return None
+        return {
+            "task_id": f"recovered-task-{session_id}",
+            "archive_uri": f"viking://archive/recovered-task-{session_id}",
+            "recovered": True,
+        }
+
+    client.commit_session = response_lost_then_empty_session
+    monkeypatch.setattr(session_commit, "_retry_delay_seconds", lambda _attempt: 0)
+    monkeypatch.setattr(
+        SessionCommitPolicyTrainer,
+        "_recover_commit_result",
+        recover_task_after_retry,
+    )
+    trainer = SessionCommitPolicyTrainer(client=client, run_id="run1")
+
+    result = await trainer._commit_session_or_recover("session-1")
+
+    assert commit_attempts == 2
+    assert recovery_attempts == 2
+    assert result["task_id"] == "recovered-task-session-1"
+
+
+@pytest.mark.asyncio
 async def test_session_commit_policy_trainer_uses_context_epoch_for_unique_session_ids():
     from openviking.session.train import SessionCommitPolicyTrainer
 

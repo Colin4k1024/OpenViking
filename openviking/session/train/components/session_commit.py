@@ -330,17 +330,26 @@ class SessionCommitPolicyTrainer:
                     await asyncio.sleep(_retry_delay_seconds(attempt))
 
     async def _commit_session_or_recover(self, session_id: str) -> dict[str, Any]:
-        try:
-            return await self.client.commit_session(
-                session_id,
-                telemetry=True,
-                keep_recent_count=self.keep_recent_count,
-            )
-        except _RETRYABLE_HTTP_ERRORS as exc:
+        attempt = 0
+        had_retryable_error = False
+        while True:
+            attempt += 1
+            try:
+                result = await self.client.commit_session(
+                    session_id,
+                    telemetry=True,
+                    keep_recent_count=self.keep_recent_count,
+                )
+            except _RETRYABLE_HTTP_ERRORS:
+                had_retryable_error = True
+            else:
+                if not had_retryable_error or result.get("task_id"):
+                    return result
+
             recovered = await self._recover_commit_result(session_id)
-            if recovered is None:
-                raise exc
-            return recovered
+            if recovered is not None:
+                return recovered
+            await asyncio.sleep(_retry_delay_seconds(attempt))
 
     async def _recover_commit_result(self, session_id: str) -> dict[str, Any] | None:
         list_tasks = getattr(self.client, "list_tasks", None)
