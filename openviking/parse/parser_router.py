@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from openviking.parse.accessors.base import LocalResource
 
 from openviking.parse.base import ParseResult
+from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
+from openviking.parse.parsers.media.utils import is_mpeg_ts
 from openviking.parse.registry import ParserRegistry
 from openviking_cli.utils.logger import get_logger
 
@@ -59,6 +61,8 @@ class ParserRouter:
                 pass
 
         ext = self._extract_extension(source_path)
+        if ext == TYPESCRIPT_MPEG_TS_EXTENSION.lstrip("."):
+            return self._is_mpeg_ts_source(source_path)
         return ext in parser_api.extensions
 
     def _extract_extension(self, source_path: Union[str, Path]) -> str:
@@ -67,6 +71,13 @@ class ParserRouter:
         if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
             source = parsed.path
         return Path(source).suffix.lower().lstrip(".")
+
+    @staticmethod
+    def _is_mpeg_ts_source(source_path: Union[str, Path]) -> bool:
+        path = Path(source_path)
+        if not path.is_file():
+            return False
+        return is_mpeg_ts(path.read_bytes()[: 188 * 3])
 
     async def parse(self, source: Union[str, Path, "LocalResource"], **kwargs) -> ParseResult:
         """

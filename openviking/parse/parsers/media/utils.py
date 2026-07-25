@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from openviking.core.path_variables import CalendarVariableProvider
+from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
 from openviking.prompts import render_prompt
 from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.utils.config import get_openviking_config
@@ -18,6 +19,15 @@ if TYPE_CHECKING:
 from .constants import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 logger = get_logger(__name__)
+
+
+def is_mpeg_ts(content: bytes) -> bool:
+    """Check if content is an MPEG-TS stream by verifying sync bytes."""
+    packet_size = 188
+    min_packets = 3
+    if len(content) < packet_size * min_packets:
+        return False
+    return all(content[i * packet_size] == 0x47 for i in range(min_packets))
 
 
 def _is_svg(data: bytes) -> bool:
@@ -65,9 +75,16 @@ def get_media_type(source_path: Optional[str], source_format: Optional[str]) -> 
     if source_format:
         if source_format in ["image", "audio", "video"]:
             return source_format
+        if source_format != TYPESCRIPT_MPEG_TS_EXTENSION.lstrip("."):
+            return None
 
     if source_path:
         ext = Path(source_path).suffix.lower()
+        if ext == TYPESCRIPT_MPEG_TS_EXTENSION:
+            path = Path(source_path)
+            if not path.is_file():
+                return None
+            return "video" if is_mpeg_ts(path.read_bytes()[: 188 * 3]) else None
         if ext in IMAGE_EXTENSIONS:
             return "image"
         elif ext in AUDIO_EXTENSIONS:
