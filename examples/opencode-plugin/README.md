@@ -23,7 +23,7 @@ examples/opencode-plugin/
 ├── index.mjs
 ├── package.json
 ├── README.md
-├── INSTALL-ZH.md
+├── INSTALL.md
 ├── lib/
 │   ├── config.mjs
 │   ├── mcp-config.mjs

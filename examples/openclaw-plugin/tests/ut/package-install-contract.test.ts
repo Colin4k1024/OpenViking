@@ -77,8 +77,6 @@ describe("OpenClaw plugin package and install contract", () => {
       "package.json",
       "README.md",
       "INSTALL.md",
-      "INSTALL-ZH.md",
-      "INSTALL-AGENT.md",
       "images/",
       "skills/",
     ]));

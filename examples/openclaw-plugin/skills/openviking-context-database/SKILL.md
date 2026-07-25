@@ -281,6 +281,5 @@ Command parsers support quoted args and flags. Resource-only flags are rejected 
 ## Reference Docs in This Repo
 
 - `README.md` / `README_CN.md`: feature overview and quick start.
-- `INSTALL.md` / `INSTALL-ZH.md`: install, upgrade, uninstall, and JSON setup handling.
-- `INSTALL-AGENT.md`: agent-oriented installation workflow.
+- `INSTALL.md`: agent-facing install contract (install, upgrade, uninstall, JSON setup handling).
 - `docs/openviking-openclaw-plugin-guide.md`: comprehensive Chinese operator/developer guide.

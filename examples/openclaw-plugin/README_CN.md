@@ -50,7 +50,7 @@ bash scripts/install.sh --json
 
 > 帮我安装 OpenViking 远程记忆插件 @openviking/openclaw-plugin。我的服务器地址是 `http://my-server:1933`，API key 是 `sk-xxx`。
 
-Agent 会自动完成安装 → 配置 → 重启 → 验证。详见 [INSTALL-AGENT.md](./INSTALL-AGENT.md)。
+Agent 会自动完成安装 → 配置 → 重启 → 验证。详见 [INSTALL.md](./INSTALL.md)。
 
 ## 工作原理
 
@@ -103,9 +103,7 @@ openclaw config get plugins.slots.contextEngine  # 应输出：openviking
 
 | 文档 | 说明 |
 |------|------|
-| [INSTALL-ZH.md](./INSTALL-ZH.md) | 完整安装、升级、卸载指南 |
-| [INSTALL.md](./INSTALL.md) | English install guide |
-| [INSTALL-AGENT.md](./INSTALL-AGENT.md) | Agent 专用操作文档 |
+| [INSTALL.md](./INSTALL.md) | Agent 安装契约（安装、升级、卸载） |
 | [docs/openviking-websocket-rpc-api.md](./docs/openviking-websocket-rpc-api.md) | 通过 OpenClaw Gateway WebSocket RPC 调用 OpenViking 工具 |
 
 > **插件 vs Skill**：本页面是 `@openviking/openclaw-plugin`（context-engine 插件）。**不要**使用 `clawhub install openviking`——那安装的是另一个 AgentSkill。
@@ -411,6 +409,6 @@ ov tui
 
 ---
 
-安装、升级、卸载请查看 [INSTALL-ZH.md](./INSTALL-ZH.md)。
+安装、升级、卸载请查看 [INSTALL.md](./INSTALL.md)。
 
 </details>

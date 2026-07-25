@@ -19,8 +19,7 @@
     "servers/",
     "scripts/",
     "README.md",
-    "INSTALL.md",
-    "INSTALL-ZH.md"
+    "INSTALL.md"
   ],
   "scripts": {
     "check": "node --check index.mjs && node --check lib/config.mjs && node --check lib/mcp-config.mjs && node --check lib/runtime.mjs && node --check lib/repo-context.mjs && node --check lib/memory-session.mjs && node --check lib/memory-recall.mjs && node --check lib/session-inject.mjs && node --check lib/viking-uri-guard.mjs && node --check lib/utils.mjs && node --check lib/shared/*.mjs && node --check servers/mcp-proxy.mjs && node --check scripts/setup.mjs && node --check tests/*.test.mjs",

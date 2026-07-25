@@ -17,7 +17,7 @@ That's it. The `setup` command activates the context-engine slot and validates t
 
 > Install the OpenClaw plugin @openviking/openclaw-plugin for OpenViking remote memory. My server is at `http://my-server:1933` and my API key is `sk-xxx`.
 
-The agent runs install → setup → restart → verify automatically. See [INSTALL-AGENT.md](./INSTALL-AGENT.md).
+The agent runs install → setup → restart → verify automatically. See [INSTALL.md](./INSTALL.md).
 
 ## How It Works
 
@@ -71,9 +71,7 @@ openclaw config get plugins.slots.contextEngine  # should output: openviking
 
 | Doc | Description |
 |-----|-------------|
-| [INSTALL.md](./INSTALL.md) | Full install, upgrade, and uninstall guide |
-| [INSTALL-ZH.md](./INSTALL-ZH.md) | Chinese install guide |
-| [INSTALL-AGENT.md](./INSTALL-AGENT.md) | Agent-oriented operator guide |
+| [INSTALL.md](./INSTALL.md) | Agent-facing install contract (install, upgrade, uninstall) |
 | [docs/openviking-tos-install-guide.md](./docs/openviking-tos-install-guide.md) | TOS release bundle publishing and installer guide |
 | [docs/openviking-openclaw-plugin-guide.md](./docs/openviking-openclaw-plugin-guide.md) | Comprehensive Chinese guide for usage, configuration, debugging, testing, build, release, deployment, and rollback |
 | [docs/openviking-websocket-rpc-api.md](./docs/openviking-websocket-rpc-api.md) | Gateway WebSocket RPC usage for OpenViking tools |

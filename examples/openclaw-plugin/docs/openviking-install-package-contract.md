@@ -16,7 +16,7 @@ The plugin package must include:
 | `package.json` | OpenClaw package metadata and runtime dependencies. |
 | `openclaw.plugin.json` | Plugin manifest. |
 | `install-manifest.json` | Install-time file contract. |
-| `README.md`, `INSTALL.md`, `INSTALL-ZH.md` | User-facing install and usage docs. |
+| `README.md`, `INSTALL.md` | Install and usage docs. |
 | `skills/` | Packaged OpenViking skills. |
 
 Helper modules added under `plugin/` must be listed in the package `files` contract or included by a package-level directory rule.

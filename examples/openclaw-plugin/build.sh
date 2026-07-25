@@ -111,8 +111,6 @@ cp -R dist "$PACKAGE_DIR/"
 cp -R skills "$PACKAGE_DIR/"
 copy_optional_file "README.md" "$PACKAGE_DIR"
 copy_optional_file "INSTALL.md" "$PACKAGE_DIR"
-copy_optional_file "INSTALL-ZH.md" "$PACKAGE_DIR"
-copy_optional_file "INSTALL-AGENT.md" "$PACKAGE_DIR"
 
 info "Installing production dependencies into package"
 npm install --omit=dev --ignore-scripts --no-audit --no-fund --package-lock=false --prefix "$PACKAGE_DIR" # npm install --omit=dev
