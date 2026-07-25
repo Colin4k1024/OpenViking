@@ -390,6 +390,8 @@ class ResourceService:
 
                 target_uri = None
                 parent_uri = VikingURI(msg.root_uri).parent.uri
+                if self._is_typescript_mpeg_ts_url(msg.path) and parent_uri == "viking://resources":
+                    parent_uri = None
             if msg.understanding_response_id is not None:
                 from openviking.parse.understanding_api import PREPARED_RESPONSE_ID_ARG
 
