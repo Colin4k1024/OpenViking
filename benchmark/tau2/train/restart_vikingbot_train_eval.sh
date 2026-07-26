@@ -26,6 +26,7 @@ SLOT="0"
 AUTO_COMMIT=false
 TAU2_ROLLOUT_SEED="${TAU2_ROLLOUT_SEED:-300}"
 TAU2_FIRST_USER_CACHE="${TAU2_FIRST_USER_CACHE:-on}"
+EXPERIENCE_RECALL_MODE="hybrid_ann"
 declare -a TRAIN_CLI_ARGS=()
 
 usage() {
@@ -48,6 +49,8 @@ Launcher options:
             Default: 300.
   --first-user-cache on|off
             Cache and replay each task/trial's first user message. Default: on.
+  --experience-recall-mode case_ann|exp_ann|hybrid_ann
+            Experience recall strategy. Default: hybrid_ann.
 
 All remaining args are passed to benchmark/tau2/train/run_batch_train_eval.sh.
 USAGE
@@ -96,6 +99,18 @@ parse_launcher_args() {
         TAU2_FIRST_USER_CACHE="${1#--first-user-cache=}"
         shift 1
         ;;
+      --experience-recall-mode)
+        if [[ $# -lt 2 ]]; then
+          echo "[restart-vikingbot-train] ERROR: --experience-recall-mode requires a value" >&2
+          exit 1
+        fi
+        EXPERIENCE_RECALL_MODE="$2"
+        shift 2
+        ;;
+      --experience-recall-mode=*)
+        EXPERIENCE_RECALL_MODE="${1#--experience-recall-mode=}"
+        shift 1
+        ;;
       -h|--help)
         usage
         exit 0
@@ -134,10 +149,18 @@ validate_first_user_cache() {
   fi
 }
 
+validate_experience_recall_mode() {
+  if [[ "${EXPERIENCE_RECALL_MODE}" != "case_ann" && "${EXPERIENCE_RECALL_MODE}" != "exp_ann" && "${EXPERIENCE_RECALL_MODE}" != "hybrid_ann" ]]; then
+    echo "[restart-vikingbot-train] ERROR: --experience-recall-mode must be case_ann, exp_ann, or hybrid_ann, got: ${EXPERIENCE_RECALL_MODE}" >&2
+    exit 1
+  fi
+}
+
 parse_launcher_args "$@"
 validate_slot
 validate_seed
 validate_first_user_cache
+validate_experience_recall_mode
 
 if [[ "${SLOT}" == "0" ]]; then
   DEFAULT_OPENVIKING_PORT="1933"
@@ -373,7 +396,7 @@ start_openviking_server() {
 }
 
 start_tau2_service() {
-  log "restarting tau2 service on ${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT} backend=${TAU2_ROLLOUT_BACKEND} loader_mode=${TAU2_EXPERIENCE_LOADER_MODE}"
+  log "restarting tau2 service on ${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT} backend=${TAU2_ROLLOUT_BACKEND} loader_mode=${TAU2_EXPERIENCE_LOADER_MODE} experience_recall_mode=${EXPERIENCE_RECALL_MODE}"
   log "tau2 service seed=${TAU2_ROLLOUT_SEED} first_user_cache=${TAU2_FIRST_USER_CACHE} concurrency=${TAU2_MAX_ROLLOUT_CONCURRENCY} rollout_thread_workers=${TAU2_ROLLOUT_THREAD_WORKERS}"
   log "tau2 service log: ${TAU2_SERVICE_LOG}"
   : > "${TAU2_SERVICE_LOG}"
@@ -388,6 +411,7 @@ start_tau2_service() {
       --config "${OPENVIKING_CONFIG_FILE}" \
       --rollout-backend "${TAU2_ROLLOUT_BACKEND}" \
       --loader-mode "${TAU2_EXPERIENCE_LOADER_MODE}" \
+      --experience-recall-mode "${EXPERIENCE_RECALL_MODE}" \
       --seed "${TAU2_ROLLOUT_SEED}" \
       --first-user-cache "${TAU2_FIRST_USER_CACHE}" \
       --max-rollout-concurrency "${TAU2_MAX_ROLLOUT_CONCURRENCY}" \

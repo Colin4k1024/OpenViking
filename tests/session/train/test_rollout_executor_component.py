@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -740,6 +741,22 @@ def test_tau2_configure_tools_removes_only_openviking_tools():
     assert normalize_tau2_experience_loader_mode("direct_experience") == "direct_experience"
 
 
+def test_tau2_experience_recall_mode_defaults_to_hybrid_ann_and_validates():
+    from benchmark.tau2.train.rollout_executor_vikingbot import (
+        DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
+        VikingBotTau2RolloutExecutor,
+        normalize_tau2_experience_recall_mode,
+    )
+
+    assert DEFAULT_TAU2_EXPERIENCE_RECALL_MODE == "hybrid_ann"
+    assert VikingBotTau2RolloutExecutor().experience_recall_mode == "hybrid_ann"
+    assert normalize_tau2_experience_recall_mode(" CASE_ANN ") == "case_ann"
+    assert normalize_tau2_experience_recall_mode("exp_ann") == "exp_ann"
+    assert normalize_tau2_experience_recall_mode(None) == "hybrid_ann"
+    with pytest.raises(ValueError, match="experience_recall_mode"):
+        normalize_tau2_experience_recall_mode("semantic")
+
+
 def test_tau2_configure_tools_binds_case_lookup_to_search_experience(monkeypatch):
     import benchmark.tau2.train.rollout_executor_vikingbot as module
 
@@ -748,8 +765,12 @@ def test_tau2_configure_tools_binds_case_lookup_to_search_experience(monkeypatch
     class FakeTool:
         name = "search_experience"
 
-    def fake_make_search_experience_tool(case_lookup=None):
+    def fake_make_search_experience_tool(
+        case_lookup=None,
+        experience_recall_mode=None,
+    ):
         observed["case_lookup"] = case_lookup
+        observed["experience_recall_mode"] = experience_recall_mode
         return FakeTool()
 
     monkeypatch.setattr(module, "_make_search_experience_tool", fake_make_search_experience_tool)
@@ -776,9 +797,13 @@ def test_tau2_configure_tools_binds_case_lookup_to_search_experience(monkeypatch
         FakeProvider(),
         keep_default_tools=True,
         case_lookup=case_lookup,
+        experience_recall_mode="exp_ann",
     )
 
-    assert observed["case_lookup"] == case_lookup
+    assert observed == {
+        "case_lookup": case_lookup,
+        "experience_recall_mode": "exp_ann",
+    }
 
 
 @pytest.mark.asyncio
@@ -943,7 +968,7 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
             observed["closed"] = True
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
-    tool = _make_search_experience_tool()
+    tool = _make_search_experience_tool(experience_recall_mode="case_ann")
 
     assert tool.parameters["required"] == ["situation"]
     assert "situation" in tool.parameters["properties"]
@@ -972,6 +997,204 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
         "situation": "The user wants to cancel all upcoming reservations.",
         "candidates": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_tau2_search_experience_exp_ann_searches_experience_tree(monkeypatch):
+    import json
+
+    import vikingbot.openviking_mount.ov_server as ov_server
+
+    from benchmark.tau2.train.rollout_executor_vikingbot import _make_search_experience_tool
+
+    exp_uri = "viking://user/u/memories/experiences/direct_hit.md"
+    observed = {}
+
+    class FakeClient:
+        @classmethod
+        async def create(cls):
+            return cls()
+
+        def _memory_target_uri(self, uri):
+            assert uri is None
+            return "viking://user/u/memories"
+
+        async def search(self, situation, *, target_uri, limit):
+            observed.update(situation=situation, target_uri=target_uri, limit=limit)
+            return {"memories": [{"uri": exp_uri, "score": 0.91}]}
+
+        async def read_content(self, uri, level="read"):
+            assert uri == exp_uri
+            assert level == "read"
+            return "## Situation\n- Applies when: direct Experience ANN matches\n\n## Reminder\nUse it."
+
+        async def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
+    tool = _make_search_experience_tool(experience_recall_mode="exp_ann")
+
+    payload = json.loads(await tool.execute(None, situation="A matching situation", limit=2))
+
+    assert observed == {
+        "situation": "A matching situation",
+        "target_uri": "viking://user/u/memories/experiences",
+        "limit": 10,
+        "closed": True,
+    }
+    assert payload == {
+        "match_type": "exp_ann",
+        "situation": "A matching situation",
+        "candidates": [
+            {
+                "rank": 1,
+                "case_name": "exp_ann",
+                "experiences": [
+                    {
+                        "uri": exp_uri,
+                        "situation": "- Applies when: direct Experience ANN matches",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_tau2_search_experience_hybrid_ann_applies_semantic_case_prior(monkeypatch):
+    import json
+
+    import vikingbot.openviking_mount.ov_server as ov_server
+
+    from benchmark.tau2.train.rollout_executor_vikingbot import _make_search_experience_tool
+
+    exp_a = "viking://user/u/memories/experiences/direct_first.md"
+    exp_b = "viking://user/u/memories/experiences/case_boosted.md"
+    case_uri = "viking://user/u/memories/cases/relevant_case.md"
+    search_calls = []
+
+    class FakeClient:
+        @classmethod
+        async def create(cls):
+            return cls()
+
+        def _memory_target_uri(self, uri):
+            assert uri is None
+            return "viking://user/u/memories"
+
+        async def search(self, situation, *, target_uri, limit):
+            search_calls.append((situation, target_uri, limit))
+            if target_uri.endswith("/experiences"):
+                return {"memories": [{"uri": exp_a}, {"uri": exp_b}]}
+            if target_uri.endswith("/cases"):
+                return {"memories": [{"uri": case_uri}]}
+            raise AssertionError(target_uri)
+
+        async def read_content(self, uri, level="read"):
+            assert level == "read"
+            if uri == case_uri:
+                return f"# relevant_case\n\n## Linked Experiences\n- [boosted]({exp_b})\n"
+            if uri == exp_a:
+                return "## Situation\n- Applies to direct first\n"
+            if uri == exp_b:
+                return "## Situation\n- Applies to case boosted\n"
+            return ""
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
+    tool = _make_search_experience_tool(experience_recall_mode="hybrid_ann")
+
+    payload = json.loads(await tool.execute(None, situation="A related task", limit=1))
+
+    assert set(search_calls) == {
+        ("A related task", "viking://user/u/memories/experiences", 10),
+        ("A related task", "viking://user/u/memories/cases", 1),
+    }
+    assert payload["match_type"] == "hybrid_ann"
+    assert payload["candidates"] == [
+        {
+            "rank": 1,
+            "case_name": "hybrid_ann",
+            "experiences": [
+                {"uri": exp_b, "situation": "- Applies to case boosted"},
+                {"uri": exp_a, "situation": "- Applies to direct first"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tau2_search_experience_hybrid_ann_exact_case_boosts_linked_experience(
+    monkeypatch,
+):
+    import json
+
+    import vikingbot.openviking_mount.ov_server as ov_server
+
+    import benchmark.tau2.train.rollout_executor_vikingbot as module
+
+    case_uri = "viking://user/u/memories/cases/tau2_airline_train_22.md"
+    direct_uri = "viking://user/u/memories/experiences/direct_first.md"
+    exact_uri = "viking://user/u/memories/experiences/exact_case.md"
+    search_calls = []
+    trace_messages = []
+    monkeypatch.setattr(
+        module,
+        "tracer",
+        SimpleNamespace(info=lambda message: trace_messages.append(json.loads(message))),
+        raising=False,
+    )
+
+    class FakeClient:
+        @classmethod
+        async def create(cls):
+            return cls()
+
+        def _memory_target_uri(self, uri):
+            assert uri is None
+            return "viking://user/u/memories"
+
+        async def search(self, situation, *, target_uri, limit):
+            search_calls.append((situation, target_uri, limit))
+            assert target_uri.endswith("/experiences")
+            return {"memories": [{"uri": direct_uri}]}
+
+        async def read_content(self, uri, level="read"):
+            assert level == "read"
+            if uri == case_uri:
+                return _tau2_exact_case_content(linked_experience_uri=exact_uri)
+            if uri == exact_uri:
+                return "## Situation\n- Exact Case guidance\n"
+            if uri == direct_uri:
+                return "## Situation\n- Direct ANN guidance\n"
+            return ""
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
+    tool = module._make_search_experience_tool(
+        case_lookup=_tau2_exact_case_lookup(),
+        experience_recall_mode="hybrid_ann",
+    )
+
+    payload = json.loads(
+        await tool.execute(
+            None,
+            situation="A matching task",
+            task_signature="tau2:airline:train:39",
+            limit=2,
+        )
+    )
+
+    assert search_calls == [("A matching task", "viking://user/u/memories/experiences", 10)]
+    assert payload["candidates"][0]["experiences"] == [
+        {"uri": exact_uri, "content": "## Situation\n- Exact Case guidance"},
+        {"uri": direct_uri, "situation": "- Direct ANN guidance"},
+    ]
+    assert trace_messages[0]["exact_case_found"] is True
 
 
 def _tau2_exact_case_lookup() -> dict:
@@ -1072,7 +1295,10 @@ async def test_tau2_search_experience_returns_exact_case_without_semantic_search
             return None
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
-    tool = module._make_search_experience_tool(case_lookup=_tau2_exact_case_lookup())
+    tool = module._make_search_experience_tool(
+        case_lookup=_tau2_exact_case_lookup(),
+        experience_recall_mode="case_ann",
+    )
 
     payload = json.loads(
         await tool.execute(
@@ -1155,7 +1381,10 @@ async def test_tau2_search_experience_exact_case_loads_unique_experiences_in_uri
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
 
     payload = json.loads(
-        await _make_search_experience_tool(case_lookup=_tau2_exact_case_lookup()).execute(
+        await _make_search_experience_tool(
+            case_lookup=_tau2_exact_case_lookup(),
+            experience_recall_mode="case_ann",
+        ).execute(
             None,
             situation="Cancel upcoming reservations.",
             task_signature="tau2:airline:train:39",
@@ -1205,7 +1434,10 @@ async def test_tau2_search_experience_returns_exact_empty_case_without_semantic_
             return None
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
-    tool = _make_search_experience_tool(case_lookup=_tau2_exact_case_lookup())
+    tool = _make_search_experience_tool(
+        case_lookup=_tau2_exact_case_lookup(),
+        experience_recall_mode="case_ann",
+    )
 
     payload = json.loads(
         await tool.execute(
@@ -1263,7 +1495,10 @@ async def test_tau2_search_experience_falls_back_when_task_signature_case_file_i
             return None
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
-    tool = _make_search_experience_tool(case_lookup=_tau2_exact_case_lookup())
+    tool = _make_search_experience_tool(
+        case_lookup=_tau2_exact_case_lookup(),
+        experience_recall_mode="case_ann",
+    )
 
     payload = json.loads(
         await tool.execute(
@@ -1326,7 +1561,7 @@ async def test_tau2_search_experience_deduplicates_experiences_across_semantic_c
             return None
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
-    tool = _make_search_experience_tool()
+    tool = _make_search_experience_tool(experience_recall_mode="case_ann")
 
     payload = json.loads(await tool.execute(None, situation="A related situation", limit=2))
 
@@ -1354,7 +1589,10 @@ async def test_tau2_search_experience_returns_error_when_client_creation_fails(m
 
     monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
 
-    result = await _make_search_experience_tool(case_lookup=_tau2_exact_case_lookup()).execute(
+    result = await _make_search_experience_tool(
+        case_lookup=_tau2_exact_case_lookup(),
+        experience_recall_mode="case_ann",
+    ).execute(
         None,
         situation="The user wants to cancel all upcoming reservations.",
         task_signature="tau2:airline:train:39",
@@ -1453,6 +1691,7 @@ def test_tau2_rollout_backend_factory_selects_vikingbot(monkeypatch):
         "seed": 300,
         "rollout_language": "zh",
         "loader_mode": "skill",
+        "experience_recall_mode": "hybrid_ann",
         "system_prompt_profile": "minimal",
         "direct_experience_content": None,
         "direct_experience_name": None,
@@ -1542,7 +1781,11 @@ def test_tau2_service_rollout_backend_option_overrides_default(monkeypatch):
     monkeypatch.setattr(service_app, "create_dataset_service_app", fake_create_dataset_service_app)
     monkeypatch.setattr(service_app, "make_tau2_rollout_executor", fake_make_tau2_rollout_executor)
 
-    app = service_app.create_app(rollout_backend="native", first_user_cache=False)
+    app = service_app.create_app(
+        rollout_backend="native",
+        experience_recall_mode="case_ann",
+        first_user_cache=False,
+    )
     executor = app["make_rollout_executor"]({"rollout_backend": "vikingbot", "max_iterations": 5})
 
     assert isinstance(executor, FakeExecutor)
@@ -1550,6 +1793,7 @@ def test_tau2_service_rollout_backend_option_overrides_default(monkeypatch):
     assert calls[-1]["factory"]["options"]["max_iterations"] == 5
     assert calls[-1]["factory"]["options"]["show_progress"] is False
     assert calls[-1]["factory"]["options"]["first_user_cache"] is False
+    assert calls[-1]["factory"]["options"]["experience_recall_mode"] == "case_ann"
 
     app["make_rollout_executor"]({"rollout_backend": "native", "show_progress": True})
     assert calls[-1]["factory"]["options"]["show_progress"] is True
@@ -1557,6 +1801,23 @@ def test_tau2_service_rollout_backend_option_overrides_default(monkeypatch):
     default_app = service_app.create_app(rollout_backend="native")
     default_app["make_rollout_executor"]({})
     assert calls[-1]["factory"]["options"]["first_user_cache"] is True
+    assert calls[-1]["factory"]["options"]["experience_recall_mode"] == "hybrid_ann"
+
+
+def test_tau2_service_cli_recall_mode_default_ignores_environment(monkeypatch):
+    import benchmark.tau2.train.service_app as service_app
+
+    monkeypatch.setenv("TAU2_EXPERIENCE_RECALL_MODE", "case_ann")
+    monkeypatch.setattr(sys, "argv", ["service_app.py"])
+
+    assert service_app.parse_args().experience_recall_mode == "hybrid_ann"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["service_app.py", "--experience-recall-mode", "exp_ann"],
+    )
+    assert service_app.parse_args().experience_recall_mode == "exp_ann"
 
 
 @pytest.mark.asyncio

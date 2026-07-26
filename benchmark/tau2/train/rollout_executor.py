@@ -16,11 +16,13 @@ from benchmark.tau2.train.rollout_executor_native import NativeTau2RolloutExecut
 from benchmark.tau2.train.rollout_executor_vikingbot import (  # re-export vikingbot-only helpers for tests
     DEFAULT_SYSTEM_PROMPT_PROFILE,
     DEFAULT_TAU2_EXPERIENCE_LOADER_MODE,
+    DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
     _append_final_answer_for_tau2_evaluation,
     _build_rollout_messages,
     _configure_tools,
     normalize_system_prompt_profile,
     normalize_tau2_experience_loader_mode,
+    normalize_tau2_experience_recall_mode,
 )
 from benchmark.tau2.train.rollout_executor_vikingbot import (
     Tau2RolloutExecutor as VikingBotTau2RolloutExecutor,
@@ -59,6 +61,9 @@ def make_tau2_rollout_executor(
             rollout_language=str(opts.get("rollout_language") or rollout_language),
             loader_mode=normalize_tau2_experience_loader_mode(
                 opts.get("loader_mode") or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
+            ),
+            experience_recall_mode=normalize_tau2_experience_recall_mode(
+                opts.get("experience_recall_mode") or DEFAULT_TAU2_EXPERIENCE_RECALL_MODE
             ),
             system_prompt_profile=normalize_system_prompt_profile(
                 opts.get("system_prompt_profile") or DEFAULT_SYSTEM_PROMPT_PROFILE
@@ -164,6 +169,7 @@ def _optional_str(value: Any) -> str | None:
 
 __all__ = [
     "DEFAULT_TAU2_EXPERIENCE_LOADER_MODE",
+    "DEFAULT_TAU2_EXPERIENCE_RECALL_MODE",
     "DEFAULT_TAU2_ROLLOUT_BACKEND",
     "NativeTau2RolloutExecutor",
     "Tau2RolloutBackend",
@@ -172,6 +178,7 @@ __all__ = [
     "make_tau2_rollout_executor",
     "normalize_system_prompt_profile",
     "normalize_tau2_experience_loader_mode",
+    "normalize_tau2_experience_recall_mode",
     "normalize_tau2_rollout_backend",
     "_append_final_answer_for_tau2_evaluation",
     "_as_tool_input",

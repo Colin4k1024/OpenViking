@@ -41,9 +41,14 @@ from openviking_cli.utils import get_logger
 logger = get_logger(__name__)
 
 Tau2ExperienceLoaderMode = Literal["skill", "constraint", "direct_experience"]
+Tau2ExperienceRecallMode = Literal["case_ann", "exp_ann", "hybrid_ann"]
 VikingBotSystemPromptProfile = Literal["full", "minimal"]
 DEFAULT_TAU2_EXPERIENCE_LOADER_MODE: Tau2ExperienceLoaderMode = "skill"
+DEFAULT_TAU2_EXPERIENCE_RECALL_MODE: Tau2ExperienceRecallMode = "hybrid_ann"
 DEFAULT_SYSTEM_PROMPT_PROFILE: VikingBotSystemPromptProfile = "minimal"
+_EXPERIENCE_RECALL_RRF_K = 60
+_SEMANTIC_CASE_PRIOR_WEIGHT = 0.25
+_EXACT_CASE_BOOST = 1.0
 DEFAULT_FIRST_USER_CACHE_DIR = (
     Path(__file__).resolve().parents[3]
     / "result"
@@ -65,6 +70,13 @@ def normalize_tau2_experience_loader_mode(value: Any) -> Tau2ExperienceLoaderMod
     mode = str(value or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE).strip().lower()
     if mode not in {"skill", "constraint", "direct_experience"}:
         raise ValueError("loader_mode must be 'skill', 'constraint', or 'direct_experience'")
+    return mode  # type: ignore[return-value]
+
+
+def normalize_tau2_experience_recall_mode(value: Any) -> Tau2ExperienceRecallMode:
+    mode = str(value or DEFAULT_TAU2_EXPERIENCE_RECALL_MODE).strip().lower()
+    if mode not in {"case_ann", "exp_ann", "hybrid_ann"}:
+        raise ValueError("experience_recall_mode must be 'case_ann', 'exp_ann', or 'hybrid_ann'")
     return mode  # type: ignore[return-value]
 
 
@@ -228,8 +240,13 @@ def _make_tau2_tool(
     return Tau2Tool(schema, provider)
 
 
-def _make_search_experience_tool(case_lookup: dict[str, Any] | None = None):
+def _make_search_experience_tool(
+    case_lookup: dict[str, Any] | None = None,
+    *,
+    experience_recall_mode: Tau2ExperienceRecallMode = DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
+):
     Tool = _vikingbot_imports()["Tool"]
+    recall_mode = normalize_tau2_experience_recall_mode(experience_recall_mode)
 
     class SearchExperienceTool(Tool):
         @property
@@ -239,11 +256,10 @@ def _make_search_experience_tool(case_lookup: dict[str, Any] | None = None):
         @property
         def description(self) -> str:
             return (
-                "Search OpenViking case memories under the current user, read each matched "
-                "case's Linked Experiences section, and return candidate case names. An exact "
-                "task_signature match auto-loads the full content of every linked experience; "
-                "semantic matches return linked experience URIs and Situation snippets for "
-                "follow-up read_experience calls."
+                "Search OpenViking experience guidance under the current user. Depending on the "
+                "configured recall mode, candidates come from Case ANN, Experience ANN, or a "
+                "hybrid of both. Entries with inline content are already loaded; entries with "
+                "only a Situation snippet require a follow-up read_experience call."
             )
 
         @property
@@ -269,7 +285,10 @@ def _make_search_experience_tool(case_lookup: dict[str, Any] | None = None):
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum candidate cases to inspect and return.",
+                        "description": (
+                            "Maximum candidate cases to inspect. Experience and hybrid modes "
+                            "derive a bounded Experience result count from this value."
+                        ),
                         "default": 2,
                     },
                 },
@@ -290,14 +309,47 @@ def _make_search_experience_tool(case_lookup: dict[str, Any] | None = None):
                 from vikingbot.openviking_mount.ov_server import VikingClient
 
                 client = await VikingClient.create()
-                target_uri = _current_cases_uri(client)
+                cases_uri = _current_cases_uri(client)
+                experiences_uri = _current_experiences_uri(client)
+                normalized_limit = min(10, max(1, int(limit)))
+                experience_limit = min(50, max(10, 5 * normalized_limit))
+
+                if recall_mode == "exp_ann":
+                    result = await client.search(
+                        situation,
+                        target_uri=experiences_uri,
+                        limit=experience_limit,
+                    )
+                    memories = result.get("memories", []) if isinstance(result, dict) else []
+                    entries = await asyncio.gather(
+                        *(
+                            _experience_ann_entry(client, item)
+                            for item in memories[:experience_limit]
+                        )
+                    )
+                    candidates = _single_experience_candidate(
+                        "exp_ann",
+                        [entry for entry in entries if entry],
+                    )
+                    _trace_experience_recall(
+                        match_type="exp_ann",
+                        task_signature=task_signature,
+                        candidates=candidates,
+                    )
+                    return _format_search_experience_response(
+                        situation=situation,
+                        task_signature=task_signature,
+                        match_type="exp_ann",
+                        candidates=candidates,
+                    )
+
                 exact_item = await _find_exact_case_item(
                     client,
                     case_lookup=case_lookup,
                     task_signature=task_signature,
-                    cases_root_uri=target_uri,
+                    cases_root_uri=cases_uri,
                 )
-                if exact_item is not None:
+                if recall_mode == "case_ann" and exact_item is not None:
                     candidate = await _exact_case_experience_summary(client, exact_item, rank=1)
                     candidates = _deduplicate_candidate_experiences([candidate])
                     _trace_experience_recall(
@@ -311,30 +363,106 @@ def _make_search_experience_tool(case_lookup: dict[str, Any] | None = None):
                         match_type="exact_case",
                         candidates=candidates,
                     )
-                result = await client.search(
+
+                if recall_mode == "case_ann":
+                    result = await client.search(
+                        situation,
+                        target_uri=cases_uri,
+                        limit=normalized_limit,
+                    )
+                    memories = result.get("memories", []) if isinstance(result, dict) else []
+                    candidates = list(
+                        await asyncio.gather(
+                            *(
+                                _experience_search_summary(client, item, rank)
+                                for rank, item in enumerate(memories, start=1)
+                            )
+                        )
+                    )
+                    candidates = _deduplicate_candidate_experiences(candidates)
+                    fallback_reason = (
+                        "task_signature_not_found" if str(task_signature or "").strip() else None
+                    )
+                    _trace_experience_recall(
+                        match_type="semantic",
+                        task_signature=task_signature,
+                        candidates=candidates,
+                        fallback_reason=fallback_reason,
+                    )
+                    return _format_search_experience_response(
+                        situation=situation,
+                        task_signature=task_signature,
+                        match_type="semantic",
+                        fallback_reason=fallback_reason,
+                        candidates=candidates,
+                    )
+
+                direct_search = client.search(
                     situation,
-                    target_uri=target_uri,
-                    limit=max(1, int(limit)),
+                    target_uri=experiences_uri,
+                    limit=experience_limit,
                 )
-                memories = result.get("memories", []) if isinstance(result, dict) else []
-                candidates = [
-                    await _experience_search_summary(client, item, rank)
-                    for rank, item in enumerate(memories, start=1)
-                ]
-                candidates = _deduplicate_candidate_experiences(candidates)
+                if exact_item is not None:
+                    direct_result = await direct_search
+                    case_candidates = [
+                        await _exact_case_experience_summary(client, exact_item, rank=1)
+                    ]
+                    exact_case = True
+                else:
+                    direct_result, case_result = await asyncio.gather(
+                        direct_search,
+                        client.search(
+                            situation,
+                            target_uri=cases_uri,
+                            limit=normalized_limit,
+                        ),
+                    )
+                    case_memories = (
+                        case_result.get("memories", []) if isinstance(case_result, dict) else []
+                    )
+                    case_candidates = list(
+                        await asyncio.gather(
+                            *(
+                                _experience_search_summary(client, item, rank)
+                                for rank, item in enumerate(case_memories, start=1)
+                            )
+                        )
+                    )
+                    exact_case = False
+
+                direct_memories = (
+                    direct_result.get("memories", []) if isinstance(direct_result, dict) else []
+                )
+                direct_entries = list(
+                    await asyncio.gather(
+                        *(
+                            _experience_ann_entry(client, item)
+                            for item in direct_memories[:experience_limit]
+                        )
+                    )
+                )
+                candidates = _fuse_hybrid_experiences(
+                    direct_entries=direct_entries,
+                    case_candidates=case_candidates,
+                    exact_case=exact_case,
+                    limit=experience_limit,
+                )
                 fallback_reason = (
-                    "task_signature_not_found" if str(task_signature or "").strip() else None
+                    "task_signature_not_found"
+                    if str(task_signature or "").strip() and not exact_case
+                    else None
                 )
                 _trace_experience_recall(
-                    match_type="semantic",
+                    match_type="hybrid_ann",
                     task_signature=task_signature,
                     candidates=candidates,
                     fallback_reason=fallback_reason,
+                    exact_case_found=exact_case,
                 )
                 return _format_search_experience_response(
                     situation=situation,
                     task_signature=task_signature,
-                    match_type="semantic",
+                    match_type="hybrid_ann",
                     fallback_reason=fallback_reason,
                     candidates=candidates,
                 )
@@ -392,12 +520,87 @@ def _deduplicate_candidate_experiences(
     return candidates
 
 
+def _single_experience_candidate(
+    name: str,
+    experiences: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not experiences:
+        return []
+    return [{"rank": 1, "case_name": name, "experiences": experiences}]
+
+
+def _fuse_hybrid_experiences(
+    *,
+    direct_entries: list[dict[str, Any] | None],
+    case_candidates: list[dict[str, Any]],
+    exact_case: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    fused: dict[str, dict[str, Any]] = {}
+    seen_order = 0
+
+    def record(
+        entry: dict[str, Any],
+        *,
+        direct_score: float = 0.0,
+        case_score: float = 0.0,
+    ) -> None:
+        nonlocal seen_order
+        uri = str(entry.get("uri") or "")
+        if not uri:
+            return
+        current = fused.get(uri)
+        if current is None:
+            current = {
+                "entry": dict(entry),
+                "direct_score": 0.0,
+                "case_score": 0.0,
+                "seen_order": seen_order,
+            }
+            fused[uri] = current
+            seen_order += 1
+        elif entry.get("content") or (
+            not current["entry"].get("situation") and entry.get("situation")
+        ):
+            current["entry"] = dict(entry)
+        current["direct_score"] = max(current["direct_score"], direct_score)
+        current["case_score"] = max(current["case_score"], case_score)
+
+    for rank, entry in enumerate(direct_entries, start=1):
+        if entry:
+            record(entry, direct_score=1.0 / (_EXPERIENCE_RECALL_RRF_K + rank))
+
+    for candidate in case_candidates:
+        rank = max(1, int(candidate.get("rank") or 1))
+        case_score = (
+            _EXACT_CASE_BOOST
+            if exact_case
+            else _SEMANTIC_CASE_PRIOR_WEIGHT / (_EXPERIENCE_RECALL_RRF_K + rank)
+        )
+        for entry in candidate.get("experiences") or []:
+            record(entry, case_score=case_score)
+
+    ranked = sorted(
+        fused.values(),
+        key=lambda item: (
+            -(item["direct_score"] + item["case_score"]),
+            item["seen_order"],
+            str(item["entry"].get("uri") or ""),
+        ),
+    )
+    return _single_experience_candidate(
+        "hybrid_ann",
+        [item["entry"] for item in ranked[: max(1, int(limit))]],
+    )
+
+
 def _trace_experience_recall(
     *,
     match_type: str,
     task_signature: str | None,
     candidates: list[dict[str, Any]],
     fallback_reason: str | None = None,
+    exact_case_found: bool | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "event": "experience_recall",
@@ -409,7 +612,9 @@ def _trace_experience_recall(
     }
     if task_signature:
         payload["task_signature"] = task_signature
-        payload["exact_case_found"] = match_type == "exact_case"
+        payload["exact_case_found"] = (
+            match_type == "exact_case" if exact_case_found is None else exact_case_found
+        )
     if fallback_reason:
         payload["fallback_reason"] = fallback_reason
     tracer.info(json.dumps(payload, ensure_ascii=False))
@@ -478,6 +683,10 @@ def _make_read_experience_tool():
 
 def _current_cases_uri(client: Any) -> str:
     return f"{client._memory_target_uri(None).rstrip('/')}/cases"
+
+
+def _current_experiences_uri(client: Any) -> str:
+    return f"{client._memory_target_uri(None).rstrip('/')}/experiences"
 
 
 async def _find_exact_case_item(
@@ -575,6 +784,21 @@ async def _experience_search_summary(client: Any, item: Any, rank: int) -> dict[
         experiences.append(exp_entry)
     summary["experiences"] = experiences
     return summary
+
+
+async def _experience_ann_entry(client: Any, item: Any) -> dict[str, Any] | None:
+    experience_uri = _case_uri(item)
+    if not experience_uri:
+        return None
+    try:
+        content = await client.read_content(experience_uri, level="read")
+    except Exception:
+        content = ""
+    situation = _markdown_section(content, "Situation") if content else ""
+    return {
+        "uri": experience_uri,
+        "situation": _shorten(situation, 600),
+    }
 
 
 async def _exact_case_experience_summary(
@@ -737,6 +961,7 @@ class VikingBotTau2RolloutExecutor:
     log_timings: bool = True
     rollout_language: str = "default"
     loader_mode: Tau2ExperienceLoaderMode = DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
+    experience_recall_mode: Tau2ExperienceRecallMode = DEFAULT_TAU2_EXPERIENCE_RECALL_MODE
     system_prompt_profile: VikingBotSystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE
     direct_experience_content: str | None = None
     direct_experience_name: str | None = None
@@ -748,6 +973,9 @@ class VikingBotTau2RolloutExecutor:
         if self.rollout_language not in {"default", "zh"}:
             raise ValueError("rollout_language must be 'default' or 'zh'")
         self.loader_mode = normalize_tau2_experience_loader_mode(self.loader_mode)
+        self.experience_recall_mode = normalize_tau2_experience_recall_mode(
+            self.experience_recall_mode
+        )
         self.system_prompt_profile = normalize_system_prompt_profile(self.system_prompt_profile)
         if (
             self.loader_mode == "direct_experience"
@@ -823,6 +1051,7 @@ class VikingBotTau2RolloutExecutor:
             provider,
             keep_default_tools=self.keep_default_tools,
             loader_mode=self.loader_mode,
+            experience_recall_mode=self.experience_recall_mode,
             record_tool_timing=timings.record_tool,
             task_id=task_id,
             task_no=task_no,
@@ -947,6 +1176,7 @@ class VikingBotTau2RolloutExecutor:
                 "ov_tools_enable": False,
                 "experience_recall_enable": self.keep_default_tools,
                 "experience_loader_mode": self.loader_mode,
+                "experience_recall_mode": self.experience_recall_mode,
                 "system_prompt_profile": self.system_prompt_profile,
                 "experience_loader_skill": experience_loader_skill,
                 "direct_experience": _direct_experience_metadata(
@@ -1205,6 +1435,7 @@ def _configure_tools(
     *,
     keep_default_tools: bool,
     loader_mode: Tau2ExperienceLoaderMode = DEFAULT_TAU2_EXPERIENCE_LOADER_MODE,
+    experience_recall_mode: Tau2ExperienceRecallMode = DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
     record_tool_timing: Callable[[str, float], None] | None = None,
     task_id: str | None = None,
     task_no: int | None = None,
@@ -1216,11 +1447,17 @@ def _configure_tools(
     # No openviking_* tool should be callable by the agent.
     del keep_default_tools
     loader_mode = normalize_tau2_experience_loader_mode(loader_mode)
+    experience_recall_mode = normalize_tau2_experience_recall_mode(experience_recall_mode)
     for tool_name in list(agent.tools.tool_names):
         if str(tool_name).startswith("openviking_"):
             agent.tools.unregister(tool_name)
     if loader_mode == "skill":
-        agent.tools.register(_make_search_experience_tool(case_lookup=case_lookup))
+        agent.tools.register(
+            _make_search_experience_tool(
+                case_lookup=case_lookup,
+                experience_recall_mode=experience_recall_mode,
+            )
+        )
         agent.tools.register(_make_read_experience_tool())
     tool_lock = _AsyncRWLock()
     write_tool_names = _classify_write_tools(provider)

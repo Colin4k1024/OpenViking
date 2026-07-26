@@ -29,9 +29,11 @@ if str(REPO_ROOT) not in sys.path:
 from benchmark.tau2.train.case_loader import Tau2CaseLoader
 from benchmark.tau2.train.rollout_executor import (
     DEFAULT_TAU2_EXPERIENCE_LOADER_MODE,
+    DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
     DEFAULT_TAU2_ROLLOUT_BACKEND,
     make_tau2_rollout_executor,
     normalize_tau2_experience_loader_mode,
+    normalize_tau2_experience_recall_mode,
     normalize_tau2_rollout_backend,
 )
 from openviking.session.train.components.dataset_service import create_dataset_service_app
@@ -56,6 +58,7 @@ def create_app(
     rollout_language: str = "default",
     rollout_backend: str | None = None,
     loader_mode: str | None = None,
+    experience_recall_mode: str | None = None,
     seed: int | None = None,
     first_user_cache: bool | None = None,
     first_user_cache_dir: str | None = None,
@@ -71,6 +74,9 @@ def create_app(
         loader_mode
         or os.getenv("TAU2_EXPERIENCE_LOADER_MODE")
         or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
+    )
+    default_experience_recall_mode = normalize_tau2_experience_recall_mode(
+        experience_recall_mode or DEFAULT_TAU2_EXPERIENCE_RECALL_MODE
     )
     default_seed = int(
         seed if seed is not None else os.getenv("TAU2_ROLLOUT_SEED", str(DEFAULT_ROLLOUT_SEED))
@@ -106,6 +112,9 @@ def create_app(
             "show_progress": options.get("show_progress", False),
             "progress_label": options.get("progress_label") or "tau2",
             "loader_mode": options.get("loader_mode") or default_loader_mode,
+            "experience_recall_mode": (
+                options.get("experience_recall_mode") or default_experience_recall_mode
+            ),
             "seed": options.get("seed") if options.get("seed") is not None else default_seed,
             "first_user_cache": options.get("first_user_cache", default_first_user_cache),
             "first_user_cache_dir": options.get(
@@ -171,6 +180,12 @@ def parse_args() -> argparse.Namespace:
         choices=["skill", "constraint", "direct_experience"],
         default=os.getenv("TAU2_EXPERIENCE_LOADER_MODE", DEFAULT_TAU2_EXPERIENCE_LOADER_MODE),
         help="Experience loading mode for vikingbot rollouts (default: skill).",
+    )
+    parser.add_argument(
+        "--experience-recall-mode",
+        choices=["case_ann", "exp_ann", "hybrid_ann"],
+        default=DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
+        help="Experience recall strategy for vikingbot rollouts (default: hybrid_ann).",
     )
     parser.add_argument(
         "--seed",
@@ -258,6 +273,7 @@ def main() -> None:
         rollout_language=args.rollout_language,
         rollout_backend=args.rollout_backend,
         loader_mode=args.loader_mode,
+        experience_recall_mode=args.experience_recall_mode,
         seed=args.seed,
         first_user_cache=args.first_user_cache == "on",
         first_user_cache_dir=args.first_user_cache_dir,
