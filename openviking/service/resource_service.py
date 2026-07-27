@@ -22,7 +22,6 @@ import httpx
 from openviking.connector.client import ConnectorClient
 from openviking.core.content_targets import ContentTargetSpec
 from openviking.core.uri_validation import validate_optional_content_target_uri
-from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
 from openviking.resource.feishu_watch_auth import (
     FEISHU_ACCESS_TOKEN_ARG,
     FEISHU_REFRESH_TOKEN_ARG,
@@ -390,8 +389,6 @@ class ResourceService:
 
                 target_uri = None
                 parent_uri = VikingURI(msg.root_uri).parent.uri
-                if self._is_typescript_mpeg_ts_url(msg.path) and parent_uri == "viking://resources":
-                    parent_uri = None
             if msg.understanding_response_id is not None:
                 from openviking.parse.understanding_api import PREPARED_RESPONSE_ID_ARG
 
@@ -635,12 +632,6 @@ class ResourceService:
     def _should_use_understanding_api(self, path: str) -> bool:
         return self._get_parser_router().should_use_understanding_api(path)
 
-    def _is_typescript_mpeg_ts_url(self, path: str) -> bool:
-        if not is_remote_resource_source(path):
-            return False
-        parser_router = self._get_parser_router()
-        return parser_router._extract_extension(path) == TYPESCRIPT_MPEG_TS_EXTENSION.lstrip(".")
-
     @staticmethod
     def _is_feishu_url(path: str) -> bool:
         try:
@@ -854,14 +845,10 @@ class ResourceService:
             if resource_lock is not None:
                 kwargs["resource_lock"] = resource_lock
 
-            defer_typescript_mpeg_ts_url = self._is_typescript_mpeg_ts_url(path)
             if (
                 not wait
                 and not is_git_repo_url(path)
-                and (
-                    self._should_use_understanding_api(path)
-                    or defer_typescript_mpeg_ts_url
-                )
+                and self._should_use_understanding_api(path)
                 and not allow_local_path_resolution
                 and self._resource_processor is not None
             ):
@@ -892,10 +879,7 @@ class ResourceService:
                     candidate_uri
                     and not source_name
                     and not watch_enabled
-                    and (
-                        self._is_feishu_url(path)
-                        or defer_typescript_mpeg_ts_url
-                    )
+                    and self._is_feishu_url(path)
                 )
                 if self._viking_fs is None:
                     raise NotInitializedError("VikingFS")
@@ -972,11 +956,7 @@ class ResourceService:
                     enqueue_started = True
                     task = await self._enqueue_add_resource_job(
                         msg,
-                        queue_name=(
-                            QueueManager.ADD_RESOURCE
-                            if defer_typescript_mpeg_ts_url
-                            else QueueManager.EXTERNAL_PARSE
-                        ),
+                        queue_name=QueueManager.EXTERNAL_PARSE,
                         resource_lock=lock_lease,
                     )
                 except BaseException:

@@ -62,7 +62,7 @@ class ParserRouter:
 
         ext = self._extract_extension(source_path)
         if ext == TYPESCRIPT_MPEG_TS_EXTENSION.lstrip("."):
-            return self._is_mpeg_ts_source(source_path)
+            return ext in parser_api.extensions and self._is_mpeg_ts_source(source_path)
         return ext in parser_api.extensions
 
     def _extract_extension(self, source_path: Union[str, Path]) -> str:
