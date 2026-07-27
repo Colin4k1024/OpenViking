@@ -185,7 +185,7 @@ def parse_args() -> argparse.Namespace:
         "--experience-recall-mode",
         choices=["case_ann", "exp_ann", "hybrid_ann"],
         default=DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
-        help="Experience recall strategy for vikingbot rollouts (default: hybrid_ann).",
+        help="Experience recall strategy for vikingbot rollouts (default: case_ann).",
     )
     parser.add_argument(
         "--seed",

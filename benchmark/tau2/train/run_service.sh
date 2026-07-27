@@ -43,7 +43,7 @@ KILL_EXISTING=1
 ROLLOUT_LANGUAGE="default"
 ROLLOUT_BACKEND="${TAU2_ROLLOUT_BACKEND:-vikingbot}"
 LOADER_MODE="${TAU2_EXPERIENCE_LOADER_MODE:-skill}"
-EXPERIENCE_RECALL_MODE="hybrid_ann"
+EXPERIENCE_RECALL_MODE="case_ann"
 ROLLOUT_SEED="${TAU2_ROLLOUT_SEED:-300}"
 FIRST_USER_CACHE="${TAU2_FIRST_USER_CACHE:-on}"
 FIRST_USER_CACHE_DIR="${TAU2_FIRST_USER_CACHE_DIR:-}"
@@ -86,7 +86,7 @@ Options:
   --loader-mode skill|constraint|direct_experience
                      VikingBot experience loading mode. Default: skill.
   --experience-recall-mode case_ann|exp_ann|hybrid_ann
-                     VikingBot experience recall strategy. Default: hybrid_ann.
+                     VikingBot experience recall strategy. Default: case_ann.
   --seed N           Base rollout seed. Default: 300.
   --first-user-cache on|off
                      Cache and replay each task/trial's first user message.

@@ -741,18 +741,19 @@ def test_tau2_configure_tools_removes_only_openviking_tools():
     assert normalize_tau2_experience_loader_mode("direct_experience") == "direct_experience"
 
 
-def test_tau2_experience_recall_mode_defaults_to_hybrid_ann_and_validates():
+def test_tau2_experience_recall_mode_defaults_to_case_ann_and_validates():
     from benchmark.tau2.train.rollout_executor_vikingbot import (
         DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
         VikingBotTau2RolloutExecutor,
         normalize_tau2_experience_recall_mode,
     )
 
-    assert DEFAULT_TAU2_EXPERIENCE_RECALL_MODE == "hybrid_ann"
-    assert VikingBotTau2RolloutExecutor().experience_recall_mode == "hybrid_ann"
+    assert DEFAULT_TAU2_EXPERIENCE_RECALL_MODE == "case_ann"
+    assert VikingBotTau2RolloutExecutor().experience_recall_mode == "case_ann"
     assert normalize_tau2_experience_recall_mode(" CASE_ANN ") == "case_ann"
     assert normalize_tau2_experience_recall_mode("exp_ann") == "exp_ann"
-    assert normalize_tau2_experience_recall_mode(None) == "hybrid_ann"
+    assert normalize_tau2_experience_recall_mode(None) == "case_ann"
+    assert normalize_tau2_experience_recall_mode("hybrid_ann") == "hybrid_ann"
     with pytest.raises(ValueError, match="experience_recall_mode"):
         normalize_tau2_experience_recall_mode("semantic")
 
@@ -1691,7 +1692,7 @@ def test_tau2_rollout_backend_factory_selects_vikingbot(monkeypatch):
         "seed": 300,
         "rollout_language": "zh",
         "loader_mode": "skill",
-        "experience_recall_mode": "hybrid_ann",
+        "experience_recall_mode": "case_ann",
         "system_prompt_profile": "minimal",
         "direct_experience_content": None,
         "direct_experience_name": None,
@@ -1801,7 +1802,7 @@ def test_tau2_service_rollout_backend_option_overrides_default(monkeypatch):
     default_app = service_app.create_app(rollout_backend="native")
     default_app["make_rollout_executor"]({})
     assert calls[-1]["factory"]["options"]["first_user_cache"] is True
-    assert calls[-1]["factory"]["options"]["experience_recall_mode"] == "hybrid_ann"
+    assert calls[-1]["factory"]["options"]["experience_recall_mode"] == "case_ann"
 
 
 def test_tau2_service_cli_recall_mode_default_ignores_environment(monkeypatch):
@@ -1810,7 +1811,7 @@ def test_tau2_service_cli_recall_mode_default_ignores_environment(monkeypatch):
     monkeypatch.setenv("TAU2_EXPERIENCE_RECALL_MODE", "case_ann")
     monkeypatch.setattr(sys, "argv", ["service_app.py"])
 
-    assert service_app.parse_args().experience_recall_mode == "hybrid_ann"
+    assert service_app.parse_args().experience_recall_mode == "case_ann"
 
     monkeypatch.setattr(
         sys,

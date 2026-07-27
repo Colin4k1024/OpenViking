@@ -26,7 +26,7 @@ SLOT="0"
 AUTO_COMMIT=false
 TAU2_ROLLOUT_SEED="${TAU2_ROLLOUT_SEED:-300}"
 TAU2_FIRST_USER_CACHE="${TAU2_FIRST_USER_CACHE:-on}"
-EXPERIENCE_RECALL_MODE="hybrid_ann"
+EXPERIENCE_RECALL_MODE="case_ann"
 declare -a TRAIN_CLI_ARGS=()
 
 usage() {
@@ -50,7 +50,7 @@ Launcher options:
   --first-user-cache on|off
             Cache and replay each task/trial's first user message. Default: on.
   --experience-recall-mode case_ann|exp_ann|hybrid_ann
-            Experience recall strategy. Default: hybrid_ann.
+            Experience recall strategy. Default: case_ann.
 
 All remaining args are passed to benchmark/tau2/train/run_batch_train_eval.sh.
 USAGE

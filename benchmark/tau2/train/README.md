@@ -51,13 +51,13 @@ bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
   --skip-final-eval
 ```
 
-Experience recall defaults to `hybrid_ann`. Use the launcher-only
-`--experience-recall-mode` argument to compare it with the Case-only or
-Experience-only paths:
+Experience recall defaults to `case_ann`. Use the launcher-only
+`--experience-recall-mode` argument to compare it with the Experience-only or
+hybrid paths:
 
 ```bash
 bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
-  --experience-recall-mode case_ann \
+  --experience-recall-mode hybrid_ann \
   --epochs 0 \
   --eval-index 14 \
   --trials 8
@@ -249,7 +249,7 @@ Service options:
 | `--config` | `~/.openviking/ov.conf` | ov.conf for VikingBot / OpenViking access |
 | `--rollout-language` | `default` | Rollout response language. Use `zh` for Chinese user-facing replies. |
 | `--rollout-backend` | `vikingbot` | Rollout implementation backend. `native` for fast Python executor, `vikingbot` for full VikingBot AgentLoop. |
-| `--experience-recall-mode` | `hybrid_ann` | Experience recall strategy: `case_ann`, `exp_ann`, or `hybrid_ann`. |
+| `--experience-recall-mode` | `case_ann` | Experience recall strategy: `case_ann`, `exp_ann`, or `hybrid_ann`. |
 | `--native-thread-workers` | `128` | Thread pool size for native rollout executor. |
 | `--rollout-thread-workers` | `200` | Worker threads used to host rollout executions off the uvicorn event loop. Use `0` to disable threaded hosting. |
 | `--max-rollout-concurrency` | `200` | Maximum concurrent rollout executions accepted by the service. |
