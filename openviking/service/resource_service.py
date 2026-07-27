@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import httpx
@@ -23,6 +24,7 @@ from openviking.connector.client import ConnectorClient
 from openviking.core.content_targets import ContentTargetSpec
 from openviking.core.uri_validation import validate_optional_content_target_uri
 from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
+from openviking.parse.parsers.media.utils import MPEG_TS_PROBE_BYTES, is_mpeg_ts
 from openviking.resource.feishu_watch_auth import (
     FEISHU_ACCESS_TOKEN_ARG,
     FEISHU_REFRESH_TOKEN_ARG,
@@ -52,7 +54,10 @@ from openviking.telemetry.resource_summary import (
 )
 from openviking.utils import is_git_repo_url, parse_code_hosting_url
 from openviking.utils.media_processor import _smart_stem
-from openviking.utils.network_guard import ensure_public_remote_target
+from openviking.utils.network_guard import (
+    build_httpx_request_validation_hooks,
+    ensure_public_remote_target,
+)
 from openviking.utils.resource_processor import ResourceProcessor
 from openviking.utils.skill_processor import SkillProcessingPreparation, SkillProcessor
 from openviking_cli.exceptions import (
@@ -633,6 +638,43 @@ class ResourceService:
     def _should_use_understanding_api(self, path: str) -> bool:
         return self._get_parser_router().should_use_understanding_api(path)
 
+    @staticmethod
+    def _remote_source_name(path: str) -> Optional[str]:
+        name = Path(unquote(urlparse(path).path)).name
+        return name or None
+
+    async def _read_remote_mpeg_ts_probe(
+        self,
+        path: str,
+        *,
+        request_validator: Any = None,
+    ) -> bytes:
+        headers = {
+            "Range": f"bytes=0-{MPEG_TS_PROBE_BYTES - 1}",
+        }
+        event_hooks = build_httpx_request_validation_hooks(request_validator)
+        client_kwargs: Dict[str, Any] = {
+            "timeout": 10.0,
+            "follow_redirects": True,
+        }
+        if event_hooks:
+            client_kwargs["event_hooks"] = event_hooks
+            client_kwargs["trust_env"] = False
+
+        chunks: List[bytes] = []
+        remaining = MPEG_TS_PROBE_BYTES
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            async with client.stream("GET", path, headers=headers) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    chunks.append(chunk[:remaining])
+                    remaining -= min(len(chunk), remaining)
+                    if remaining <= 0:
+                        break
+        return b"".join(chunks)
+
     async def _resolve_typescript_mpeg_ts_url_info(
         self,
         path: str,
@@ -646,22 +688,29 @@ class ResourceService:
         ):
             return None
 
-        from openviking.parse.accessors.registry import get_accessor_registry
+        try:
+            from openviking_cli.utils.config.open_viking_config import get_openviking_config
 
-        local_resource = await get_accessor_registry().access(
+            parser_api = get_openviking_config().parser_api
+        except Exception:
+            return None
+
+        if not parser_api.enable or TYPESCRIPT_MPEG_TS_EXTENSION.lstrip(".") not in (
+            parser_api.extensions or []
+        ):
+            return None
+
+        probe = await self._read_remote_mpeg_ts_probe(
             path,
             request_validator=request_validator,
         )
-        try:
-            if not self._should_use_understanding_api(str(local_resource.path)):
-                return None
-            return _ResourceSourceInfo(
-                source_name=source_name or local_resource.meta.get("original_filename"),
-                source_path=path,
-                source_format="video",
-            )
-        finally:
-            local_resource.cleanup()
+        if not is_mpeg_ts(probe):
+            return None
+        return _ResourceSourceInfo(
+            source_name=source_name or self._remote_source_name(path),
+            source_path=path,
+            source_format="video",
+        )
 
     @staticmethod
     def _is_feishu_url(path: str) -> bool:
