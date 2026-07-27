@@ -23,12 +23,13 @@ from typing import Any, Dict, Mapping, Optional, Tuple, Union
 from urllib.parse import unquote, urlparse
 
 from openviking.parse.base import lazy_import
-from openviking.parse.parsers.constants import CODE_EXTENSIONS
+from openviking.parse.parsers.constants import CODE_EXTENSIONS, TYPESCRIPT_MPEG_TS_EXTENSION
 from openviking.parse.parsers.media.constants import (
     AUDIO_EXTENSIONS,
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
 )
+from openviking.parse.parsers.media.utils import is_mpeg_ts
 from openviking.utils import is_code_hosting_blob_url
 from openviking.utils.network_guard import build_httpx_request_validation_hooks
 from openviking_cli.exceptions import PermissionDeniedError
@@ -64,6 +65,11 @@ class URLType(Enum):
     DOWNLOAD_VIDEO = "download_video"  # Video file download link
     DOWNLOAD_DOCUMENT = "download_document"  # Office/e-book/archive document link
     UNKNOWN = "unknown"  # Unknown or unsupported type
+
+
+AMBIGUOUS_EXTENSION_FALLBACKS = {
+    TYPESCRIPT_MPEG_TS_EXTENSION: URLType.DOWNLOAD_TXT,
+}
 
 
 class URLTypeDetector:
@@ -187,7 +193,11 @@ class URLTypeDetector:
 
         # === Step 1: Check extension from URL path ===
         path_ext = Path(path_lower).suffix
-        if path_ext and path_ext in valid_extensions:
+        if path_ext in AMBIGUOUS_EXTENSION_FALLBACKS:
+            meta["detected_by"] = "ambiguous_extension"
+            meta["extension"] = path_ext
+            return AMBIGUOUS_EXTENSION_FALLBACKS[path_ext], meta
+        elif path_ext and path_ext in valid_extensions:
             for ext, url_type in self.EXTENSION_MAP.items():
                 if path_lower.endswith(ext):
                     meta["detected_by"] = "extension"
@@ -731,6 +741,8 @@ class HTTPAccessor(DataAccessor):
             return URLType.DOWNLOAD_AUDIO, ".mp3"
         if sample.startswith(b"\x0b\x77"):
             return URLType.DOWNLOAD_AUDIO, ".ac3"
+        if sample.startswith(b"\x47") and is_mpeg_ts(content):
+            return URLType.DOWNLOAD_VIDEO, ".ts"
         if len(sample) >= 12 and sample[4:8] == b"ftyp":
             brand = sample[8:12].lower()
             if brand in {b"qt  ", b"moov"}:
@@ -805,7 +817,9 @@ class HTTPAccessor(DataAccessor):
         Returns:
             File extension including dot (e.g., ".pdf")
         """
-        valid_extensions = set(URLTypeDetector.EXTENSION_MAP.keys())
+        valid_extensions = set(URLTypeDetector.EXTENSION_MAP.keys()) | set(
+            AMBIGUOUS_EXTENSION_FALLBACKS.keys()
+        )
 
         # 1. Try extension from Content-Disposition filename
         filename_from_disposition = detect_meta.get("filename_from_disposition")
