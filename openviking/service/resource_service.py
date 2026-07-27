@@ -22,6 +22,7 @@ import httpx
 from openviking.connector.client import ConnectorClient
 from openviking.core.content_targets import ContentTargetSpec
 from openviking.core.uri_validation import validate_optional_content_target_uri
+from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
 from openviking.resource.feishu_watch_auth import (
     FEISHU_ACCESS_TOKEN_ARG,
     FEISHU_REFRESH_TOKEN_ARG,
@@ -632,6 +633,36 @@ class ResourceService:
     def _should_use_understanding_api(self, path: str) -> bool:
         return self._get_parser_router().should_use_understanding_api(path)
 
+    async def _resolve_typescript_mpeg_ts_url_info(
+        self,
+        path: str,
+        *,
+        source_name: Optional[str],
+        request_validator: Any = None,
+    ) -> Optional[_ResourceSourceInfo]:
+        if (
+            self._get_parser_router()._extract_extension(path)
+            != TYPESCRIPT_MPEG_TS_EXTENSION.lstrip(".")
+        ):
+            return None
+
+        from openviking.parse.accessors.registry import get_accessor_registry
+
+        local_resource = await get_accessor_registry().access(
+            path,
+            request_validator=request_validator,
+        )
+        try:
+            if not self._should_use_understanding_api(str(local_resource.path)):
+                return None
+            return _ResourceSourceInfo(
+                source_name=source_name or local_resource.meta.get("original_filename"),
+                source_path=path,
+                source_format="video",
+            )
+        finally:
+            local_resource.cleanup()
+
     @staticmethod
     def _is_feishu_url(path: str) -> bool:
         try:
@@ -845,21 +876,39 @@ class ResourceService:
             if resource_lock is not None:
                 kwargs["resource_lock"] = resource_lock
 
+            uses_understanding_api = self._should_use_understanding_api(path)
+            is_typescript_mpeg_ts_url = (
+                is_remote_resource_source(path)
+                and self._get_parser_router()._extract_extension(path)
+                == TYPESCRIPT_MPEG_TS_EXTENSION.lstrip(".")
+            )
+            source_name = kwargs.get("source_name")
+            external_parse_source_info = None
             if (
                 not wait
                 and not is_git_repo_url(path)
-                and self._should_use_understanding_api(path)
+                and (uses_understanding_api or is_typescript_mpeg_ts_url)
                 and not allow_local_path_resolution
                 and self._resource_processor is not None
             ):
+                if uses_understanding_api:
+                    external_parse_source_info = _ResourceSourceInfo(
+                        source_name=source_name,
+                        source_path=path,
+                        source_format="file",
+                    )
+                else:
+                    external_parse_source_info = await self._resolve_typescript_mpeg_ts_url_info(
+                        path,
+                        source_name=source_name,
+                        request_validator=kwargs.get("request_validator"),
+                    )
+
+            if external_parse_source_info is not None:
                 from openviking.storage.queuefs.add_resource_msg import AddResourceMsg
 
-                source_name = kwargs.get("source_name")
-                source_info = _ResourceSourceInfo(
-                    source_name=source_name,
-                    source_path=path,
-                    source_format="file",
-                )
+                source_info = external_parse_source_info
+
                 doc_name = self._target_doc_name(path, source_name, source_info)
                 source_path = source_info.source_path or source_name or path
                 (
