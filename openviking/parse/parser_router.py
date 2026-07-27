@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from openviking.parse.base import ParseResult
 from openviking.parse.parsers.constants import TYPESCRIPT_MPEG_TS_EXTENSION
-from openviking.parse.parsers.media.utils import is_mpeg_ts
+from openviking.parse.parsers.media.utils import is_mpeg_ts, read_mpeg_ts_probe
 from openviking.parse.registry import ParserRegistry
 from openviking_cli.utils.logger import get_logger
 
@@ -77,7 +77,7 @@ class ParserRouter:
         path = Path(source_path)
         if not path.is_file():
             return False
-        return is_mpeg_ts(path.read_bytes()[: 188 * 3])
+        return is_mpeg_ts(read_mpeg_ts_probe(path))
 
     async def parse(self, source: Union[str, Path, "LocalResource"], **kwargs) -> ParseResult:
         """
