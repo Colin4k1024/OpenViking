@@ -85,6 +85,8 @@ pub async fn build_multi_write_fs(
             build_ctx
                 .enc_provider_type
                 .expect("global encryption validated before building primary backend"),
+            build_ctx.pathlock_manager.clone(),
+            build_ctx.backend_prefix.clone(),
         ))
     } else {
         primary_raw.clone()
@@ -146,6 +148,8 @@ pub async fn build_multi_write_fs(
                 build_ctx
                     .enc_provider_type
                     .expect("global encryption validated before building backup backend"),
+                build_ctx.pathlock_manager.clone(),
+                build_ctx.backend_prefix.clone(),
             ))
         } else {
             backup_raw
