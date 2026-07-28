@@ -1099,12 +1099,18 @@ enum TaskCommands {
         #[arg(value_name = "task-id")]
         task_id: String,
     },
+    /// Cancel a task
+    Cancel {
+        /// Task ID returned by add-resource/add-skill
+        #[arg(value_name = "task-id")]
+        task_id: String,
+    },
     /// List all tracked tasks
     List {
         /// Filter by task type (e.g. add_resource, add_skill, session_commit, reindex)
         #[arg(long, value_name = "type")]
         task_type: Option<String>,
-        /// Filter by status (pending, running, completed, failed)
+        /// Filter by status (pending, running, completed, failed, cancelled)
         #[arg(long, value_name = "status")]
         status: Option<String>,
     },
@@ -2210,7 +2216,7 @@ fn command_tokens_for_config_gate(args: &[OsString]) -> Vec<String> {
 
 fn known_task_command_requires_config(tokens: &[String]) -> bool {
     match tokens.get(1).map(String::as_str) {
-        Some("status" | "list") => true,
+        Some("status" | "cancel" | "list") => true,
         Some("watch") => match tokens.get(2).map(String::as_str) {
             None => true,
             Some(token) => is_watch_subcommand(token),
@@ -3001,6 +3007,10 @@ async fn main() {
                 let client = ctx.get_client();
                 commands::task::status(&client, &task_id, ctx.output_format, ctx.compact).await
             }
+            TaskCommands::Cancel { task_id } => {
+                let client = ctx.get_client();
+                commands::task::cancel(&client, &task_id, ctx.output_format, ctx.compact).await
+            }
             TaskCommands::List { task_type, status } => {
                 let client = ctx.get_client();
                 commands::task::list(
@@ -3747,6 +3757,7 @@ mod tests {
         for args in [
             &["ov", "find"][..],
             &["ov", "task", "status"],
+            &["ov", "task", "cancel"],
             &["ov", "task", "watch", "show"],
             &["ov", "config", "validate"],
             &["ov", "config", "show"],
@@ -3809,6 +3820,7 @@ mod tests {
             &["ov", "config", "show"],
             &["ov", "config", "validate"],
             &["ov", "task", "status"],
+            &["ov", "task", "cancel"],
             &["ov", "task", "list"],
             &["ov", "task", "watch"],
             &["ov", "task", "watch", "ls"],
