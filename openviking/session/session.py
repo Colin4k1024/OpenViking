@@ -21,7 +21,6 @@ from openviking.message.part import ContextPart, TextPart, ToolPart
 from openviking.pyagfs.exceptions import AGFSClientError, AGFSHTTPError, AGFSNotFoundError
 from openviking.server.config import ToolOutputExternalizationConfig
 from openviking.server.identity import RequestContext, Role
-from openviking.service.session_auto_commit import should_enable_auto_commit
 from openviking.session.auto_commit_policy import AutoCommitPolicy
 from openviking.session.memory.constants import (
     AGENT_EVOLUTION_MEMORY_TYPES,

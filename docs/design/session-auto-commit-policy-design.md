@@ -158,6 +158,22 @@ def get_keep_recent_count(policy): return max(0, ...)
   - 请求未显式传策略，且 `default_enabled=false`（默认）：关闭。`session.meta.auto_commit_policy = None`。
 - 响应 `result.config.auto_commit_policy` 返回当前 session 的有效配置；关闭时为 `null`。
 
+### 自动创建：首次写消息
+
+单条与批量消息写入接口仍支持对不存在的 session 做自动创建（`auto_create=True`）。
+这条路径必须和显式 `POST /api/v1/sessions` 保持同一套默认启用语义：
+
+- `memory.session_auto_commit.default_enabled=false`（默认）时，首次写消息创建出的 session
+  保持关闭，`auto_commit_policy=None`。
+- `memory.session_auto_commit.default_enabled=true` 时，首次写消息创建出的 session
+  写入完整默认策略，后续同一条消息写入完成后即可按 token/message 阈值进入自动
+  commit 判定。
+- 消息写入请求本身不接受 per-message `auto_commit_policy`。旧客户端继续传该字段时，
+  HTTP / embedded batch 路径都会忽略它，不能借首次写消息开启或修改 session 策略。
+
+这样保证“先 create 再写消息”和“直接首次写消息创建 session”两条公开创建路径，在
+全局默认开关下得到一致的自动 commit 行为。
+
 ### 查看：`GET /api/v1/sessions/{session_id}`
 
 - 响应在 `session.meta.to_dict()` 之外追加 `result.config = effective_session_config(session)`。
@@ -458,7 +474,7 @@ Rust CLI 当前不提供 `auto_commit_policy set` 或运行期更新命令。`ov
 
 - `tests/unit/session/test_auto_commit_policy.py`（13）— dataclass 默认值、clamp（越界/负数）、未知键拒绝、非整数拒绝、merge 部分覆盖、to_dict。
 - `tests/unit/service/test_session_auto_commit.py`（17）— 触发判定（token/message 严格大于）、`policy is None` 跳过 message_write / idle_timeout、节流窗口、idle 全量提交、时区归一、`commit_calls=(keep_recent_count, persist_keep_recent_count)` 断言、去重。
-- `tests/server/test_api_sessions.py`（新增/改写多条）— 默认关闭时 create / GET 返回 `auto_commit_policy=null`、`default_enabled=true` 时 create 写入默认策略、显式 `{}` / 部分字段启用并填充默认、clamp 返回 200、未知字段 400、`PATCH /sessions/{id}` 返回 405、`keep_recent_count` 与 `pending_tokens` 解耦、移除的逐消息入参被静默忽略。
+- `tests/server/test_api_sessions.py`（新增/改写多条）— 默认关闭时 create / GET 返回 `auto_commit_policy=null`、`default_enabled=true` 时 create 与首次写消息 auto-create 都写入默认策略、显式 `{}` / 部分字段启用并填充默认、clamp 返回 200、未知字段 400、`PATCH /sessions/{id}` 返回 405、`keep_recent_count` 与 `pending_tokens` 解耦、移除的逐消息入参被静默忽略。
 - Rust：`cargo test -p ov_cli` 覆盖 session 命令仍不会把移除的 message-level `auto_commit_policy` 写入消息请求体。
 
 已知无关失败：`test_tool_result_externalization_respects_server_config_disabled`、`test_commit_endpoint_returns_accepted_with_task_id` 等在 HEAD 基线上也失败（这些用例自建 app 未接 dev auth plugin，返回 401），与本设计无关。
