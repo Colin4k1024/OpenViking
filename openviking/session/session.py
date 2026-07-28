@@ -565,7 +565,6 @@ class Session:
         ctx: Optional[RequestContext] = None,
         session_id: Optional[str] = None,
         session_uri: Optional[str] = None,
-        auto_commit_threshold: int = 8000,
         tool_output_externalization_config: Optional[ToolOutputExternalizationConfig] = None,
         agent_evolution_enabled: bool = True,
         usage_reporter: Optional["UsageReporter"] = None,
@@ -579,7 +578,6 @@ class Session:
             session_id or f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid4().hex[:16]}"
         )
         self.created_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-        self._auto_commit_threshold = auto_commit_threshold
         self._session_uri = session_uri or canonical_session_uri(self.ctx, self.session_id)
 
         self._messages: List[Message] = []
