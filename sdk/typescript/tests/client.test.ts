@@ -88,6 +88,29 @@ describe("OpenVikingClient", () => {
     });
   });
 
+  it("sends processing_mode for addResource requests", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(ok({}));
+    const client = new OpenVikingClient({
+      baseUrl: "https://example.com",
+      fetch: fetcher,
+    });
+
+    await client.addResource("https://example.com/guide.md", {
+      to: "viking://resources/guide",
+      processingMode: "vectors_only",
+      wait: true,
+    });
+
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url)).toBe("https://example.com/api/v1/resources");
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      path: "https://example.com/guide.md",
+      to: "viking://resources/guide",
+      processing_mode: "vectors_only",
+      wait: true,
+    });
+  });
+
   it("maps response envelopes to typed errors", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -268,7 +291,7 @@ describe("OpenVikingClient", () => {
     expect(skillUrl.searchParams.get("include_source")).toBe("false");
   });
 
-  it("cancels a task with optional owner coordinates", async () => {
+  it("cancels the current user's task", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValue(ok({ status: "cancelled" }));
@@ -277,12 +300,11 @@ describe("OpenVikingClient", () => {
       fetch: fetcher,
     });
 
-    await client.cancelTask("task/1", { accountId: "acme", userId: "alice" });
+    await client.cancelTask("task/1");
 
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.pathname).toBe("/api/v1/tasks/task%2F1/cancel");
-    expect(url.searchParams.get("account_id")).toBe("acme");
-    expect(url.searchParams.get("user_id")).toBe("alice");
+    expect(url.search).toBe("");
     expect(fetcher.mock.calls[0]![1]?.method).toBe("POST");
   });
 

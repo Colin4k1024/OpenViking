@@ -119,6 +119,7 @@ export class OpenVikingClient {
       directly_upload_media: options.directlyUploadMedia ?? true,
       preserve_structure: options.preserveStructure,
       watch_interval: options.watchInterval ?? 0,
+      processing_mode: options.processingMode,
       args:
         options.args && Object.keys(options.args).length
           ? options.args
@@ -752,16 +753,11 @@ export class OpenVikingClient {
     }
   }
 
-  cancelTask(
-    taskId: string,
-    options: { accountId?: string; userId?: string } = {},
-  ): Promise<JsonObject> {
-    return this.request("POST", `/api/v1/tasks/${pathPart(taskId)}/cancel`, {
-      query: {
-        account_id: options.accountId,
-        user_id: options.userId,
-      },
-    }) as Promise<JsonObject>;
+  cancelTask(taskId: string): Promise<JsonObject> {
+    return this.request(
+      "POST",
+      `/api/v1/tasks/${pathPart(taskId)}/cancel`,
+    ) as Promise<JsonObject>;
   }
   /** List background tasks. */
   listTasks(options: TaskListOptions = {}): Promise<unknown[]> {
