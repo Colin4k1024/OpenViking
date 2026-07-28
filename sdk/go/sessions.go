@@ -140,22 +140,13 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (map[string]any, er
 func (c *Client) CancelTask(
 	ctx context.Context,
 	taskID string,
-	accountID string,
-	userID string,
 ) (map[string]any, error) {
-	query := url.Values{}
-	if accountID != "" {
-		query.Set("account_id", accountID)
-	}
-	if userID != "" {
-		query.Set("user_id", userID)
-	}
 	var result map[string]any
 	err := c.doJSON(
 		ctx,
 		http.MethodPost,
 		"/api/v1/tasks/"+url.PathEscape(taskID)+"/cancel",
-		query,
+		nil,
 		nil,
 		&result,
 	)

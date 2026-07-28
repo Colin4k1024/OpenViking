@@ -291,7 +291,7 @@ describe("OpenVikingClient", () => {
     expect(skillUrl.searchParams.get("include_source")).toBe("false");
   });
 
-  it("cancels a task with optional owner coordinates", async () => {
+  it("cancels the current user's task", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValue(ok({ status: "cancelled" }));
@@ -300,12 +300,11 @@ describe("OpenVikingClient", () => {
       fetch: fetcher,
     });
 
-    await client.cancelTask("task/1", { accountId: "acme", userId: "alice" });
+    await client.cancelTask("task/1");
 
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.pathname).toBe("/api/v1/tasks/task%2F1/cancel");
-    expect(url.searchParams.get("account_id")).toBe("acme");
-    expect(url.searchParams.get("user_id")).toBe("alice");
+    expect(url.search).toBe("");
     expect(fetcher.mock.calls[0]![1]?.method).toBe("POST");
   });
 

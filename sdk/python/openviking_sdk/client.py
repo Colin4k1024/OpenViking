@@ -1355,19 +1355,8 @@ class AsyncHTTPClient:
             return None
         return self._handle_response(response)
 
-    async def cancel_task(
-        self,
-        task_id: str,
-        *,
-        account_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        params = {
-            key: value
-            for key, value in {"account_id": account_id, "user_id": user_id}.items()
-            if value is not None
-        }
-        response = await self._request("POST", f"/api/v1/tasks/{task_id}/cancel", params=params)
+    async def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        response = await self._request("POST", f"/api/v1/tasks/{task_id}/cancel")
         return self._handle_response(response)
 
     async def list_tasks(
@@ -2323,20 +2312,8 @@ class SyncHTTPClient:
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return run_async(self._async_client.get_task(task_id))
 
-    def cancel_task(
-        self,
-        task_id: str,
-        *,
-        account_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.cancel_task(
-                task_id,
-                account_id=account_id,
-                user_id=user_id,
-            )
-        )
+    def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        return run_async(self._async_client.cancel_task(task_id))
 
     def list_tasks(
         self,

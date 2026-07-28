@@ -1172,14 +1172,14 @@ func TestCancelTaskRequest(t *testing.T) {
 		if r.URL.Path != "/api/v1/tasks/task-1/cancel" {
 			t.Fatalf("path = %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("account_id") != "acme" || r.URL.Query().Get("user_id") != "alice" {
+		if r.URL.RawQuery != "profile=1" {
 			t.Fatalf("query = %s", r.URL.RawQuery)
 		}
 		writeOK(t, w, map[string]any{"task_id": "task-1", "status": "cancelled"})
 	}))
 	defer closeServer()
 
-	task, err := client.CancelTask(context.Background(), "task-1", "acme", "alice")
+	task, err := client.CancelTask(context.Background(), "task-1")
 	if err != nil {
 		t.Fatal(err)
 	}
