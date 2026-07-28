@@ -62,7 +62,6 @@ from openviking_cli.utils.logger import init_otel_log_handler_from_server_config
 logger = get_logger(__name__)
 
 
-
 async def _initialize_auth_plugin(
     app: FastAPI,
     service: OpenVikingService,
@@ -111,6 +110,13 @@ async def _initialize_runtime_state(
     """Initialize service and auth dependencies before traffic is accepted."""
     await service.initialize()
     await _initialize_auth_plugin(app, service, config)
+    from openviking.service.user_deletion import setup_user_deletion
+
+    await setup_user_deletion(
+        service,
+        app.state.api_key_manager,
+        config.temp_upload.shared_prefix,
+    )
     logger.info("OpenVikingService initialization complete")
 
 
