@@ -990,7 +990,7 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
     assert observed == {
         "situation": "The user wants to cancel all upcoming reservations.",
         "target_uri": "viking://user/u/memories/cases",
-        "limit": 3,
+        "limit": 10,
         "closed": True,
     }
     assert payload == {
@@ -998,6 +998,84 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
         "situation": "The user wants to cancel all upcoming reservations.",
         "candidates": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_tau2_search_experience_case_ann_searches_ten_and_expands_default_top_two(
+    monkeypatch,
+):
+    import json
+
+    import vikingbot.openviking_mount.ov_server as ov_server
+
+    from benchmark.tau2.train.rollout_executor_vikingbot import _make_search_experience_tool
+
+    case_uris = [f"viking://user/u/memories/cases/case_{index}.md" for index in range(1, 4)]
+    exp_uris = [
+        f"viking://user/u/memories/experiences/experience_{index}.md" for index in range(1, 4)
+    ]
+
+    class FakeClient:
+        search_calls = []
+        read_uris = []
+
+        @classmethod
+        async def create(cls):
+            return cls()
+
+        def _memory_target_uri(self, uri):
+            assert uri is None
+            return "viking://user/u/memories"
+
+        async def search(self, situation, *, target_uri, limit):
+            self.search_calls.append((situation, target_uri, limit))
+            return {
+                "memories": [
+                    {
+                        "uri": case_uri,
+                        "score": 1.0 - index / 10,
+                        "abstract": f"Case {index}",
+                    }
+                    for index, case_uri in enumerate(case_uris, start=1)
+                ]
+            }
+
+        async def read_content(self, uri, level="read"):
+            assert level == "read"
+            self.read_uris.append(uri)
+            if uri in case_uris:
+                index = case_uris.index(uri)
+                return (
+                    f"# case_{index + 1}\n\n"
+                    "## Linked Experiences\n"
+                    f"- [experience_{index + 1}]({exp_uris[index]})\n"
+                )
+            if uri in exp_uris:
+                index = exp_uris.index(uri)
+                return f"## Situation\n- Applies to ranked case {index + 1}\n"
+            raise AssertionError(f"unexpected uri: {uri}")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(ov_server, "VikingClient", FakeClient)
+    tool = _make_search_experience_tool(experience_recall_mode="case_ann")
+
+    payload = json.loads(await tool.execute(None, situation="A ranked airline request"))
+
+    assert FakeClient.search_calls == [
+        (
+            "A ranked airline request",
+            "viking://user/u/memories/cases",
+            10,
+        )
+    ]
+    assert [candidate["case_name"] for candidate in payload["candidates"]] == [
+        "case_1",
+        "case_2",
+    ]
+    assert case_uris[2] not in FakeClient.read_uris
+    assert exp_uris[2] not in FakeClient.read_uris
 
 
 @pytest.mark.asyncio
@@ -1517,7 +1595,7 @@ async def test_tau2_search_experience_falls_back_when_task_signature_case_file_i
         (
             "The user wants to cancel all upcoming reservations.",
             "viking://user/u/memories/cases",
-            2,
+            10,
         )
     ]
 

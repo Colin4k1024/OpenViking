@@ -45,6 +45,7 @@ Tau2ExperienceRecallMode = Literal["case_ann", "exp_ann", "hybrid_ann"]
 VikingBotSystemPromptProfile = Literal["full", "minimal"]
 DEFAULT_TAU2_EXPERIENCE_LOADER_MODE: Tau2ExperienceLoaderMode = "skill"
 DEFAULT_TAU2_EXPERIENCE_RECALL_MODE: Tau2ExperienceRecallMode = "case_ann"
+_TAU2_CASE_SEARCH_LIMIT = 10
 DEFAULT_SYSTEM_PROMPT_PROFILE: VikingBotSystemPromptProfile = "minimal"
 _EXPERIENCE_RECALL_RRF_K = 60
 _SEMANTIC_CASE_PRIOR_WEIGHT = 0.25
@@ -286,8 +287,10 @@ def _make_search_experience_tool(
                     "limit": {
                         "type": "integer",
                         "description": (
-                            "Maximum candidate cases to inspect. Experience and hybrid modes "
-                            "derive a bounded Experience result count from this value."
+                            "Maximum candidate cases to return. Case ANN internally searches ten "
+                            "Cases so configured OpenViking reranking can rank a wider pool. "
+                            "Experience and hybrid modes derive a bounded Experience result count "
+                            "from this value."
                         ),
                         "default": 2,
                     },
@@ -368,14 +371,17 @@ def _make_search_experience_tool(
                     result = await client.search(
                         situation,
                         target_uri=cases_uri,
-                        limit=normalized_limit,
+                        limit=_TAU2_CASE_SEARCH_LIMIT,
                     )
                     memories = result.get("memories", []) if isinstance(result, dict) else []
                     candidates = list(
                         await asyncio.gather(
                             *(
                                 _experience_search_summary(client, item, rank)
-                                for rank, item in enumerate(memories, start=1)
+                                for rank, item in enumerate(
+                                    memories[:normalized_limit],
+                                    start=1,
+                                )
                             )
                         )
                     )
