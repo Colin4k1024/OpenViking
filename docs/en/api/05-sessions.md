@@ -411,7 +411,8 @@ ov session get a1b2c3d4
 
 Session config is immutable after creation. Set `config.auto_commit_policy` when
 creating the session, then use `GET /api/v1/sessions/{session_id}` to inspect the
-effective config. `PATCH /api/v1/sessions/{session_id}` is not supported.
+effective config. Runtime session-config updates are not exposed by the Sessions
+API.
 
 ---
 

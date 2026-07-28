@@ -154,7 +154,6 @@ Run `ov --help` and `ov <command> --help` for the exact command surface of your 
 - `session new` - Create a session.
 - `session list` - List sessions.
 - `session get` - Get session details.
-- `session delete` - Delete a session.
 - `session get-session-context` - Get merged session context.
 - `session add-message` / `session add-messages` - Add messages to a session.
 - `session commit` - Archive messages and extract memories.
@@ -271,7 +270,6 @@ ov glob "**/*.md" --uri viking://resources
 # Session workflow
 SESSION=$(ov -o json session new | jq -r '.result.session_id')
 ov session add-message --session-id "$SESSION" --role user --content "Hello"
-ov session add-message --session-id "$SESSION" --role user --content "remember this"
 ov session commit --session-id "$SESSION"
 
 # Watch task management

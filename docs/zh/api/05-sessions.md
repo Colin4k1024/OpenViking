@@ -411,7 +411,7 @@ ov session get a1b2c3d4
 
 Session 配置创建后不可变。请在创建 session 时设置
 `config.auto_commit_policy`，之后通过 `GET /api/v1/sessions/{session_id}` 查看生效配置。
-`PATCH /api/v1/sessions/{session_id}` 不再支持。
+Sessions API 不提供运行期 session 配置更新接口。
 
 ---
 
