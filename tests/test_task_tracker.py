@@ -3,6 +3,7 @@
 
 """Unit tests for TaskTracker."""
 
+import asyncio
 import json
 import time
 
@@ -195,6 +196,55 @@ async def test_fail_task(tracker: TaskTracker):
     assert retrieved.status == TaskStatus.FAILED
     assert retrieved.stage == "failed"
     assert "LLM timeout" in retrieved.error
+
+
+async def test_cancel_pending_is_terminal_and_idempotent(tracker: TaskTracker):
+    task = await tracker.create("add_resource", **_owner_kwargs())
+
+    first = await tracker.cancel(task.task_id, **_owner_kwargs())
+    second = await tracker.cancel(task.task_id, **_owner_kwargs())
+
+    assert first is not None
+    assert first.status == TaskStatus.CANCELLED
+    assert first.stage == "cancelled"
+    assert second == first
+
+
+async def test_cancel_running_interrupts_registered_task(tracker: TaskTracker):
+    task = await tracker.create("admin_reindex", **_owner_kwargs())
+    started = asyncio.Event()
+
+    async def run():
+        await tracker.start(task.task_id, **_owner_kwargs())
+        current = asyncio.current_task()
+        assert current is not None
+        await tracker.register_running_task(task.task_id, current, **_owner_kwargs())
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await tracker.mark_cancelled(task.task_id, **_owner_kwargs())
+        finally:
+            tracker.unregister_running_task(task.task_id)
+
+    running = asyncio.create_task(run())
+    await started.wait()
+    snapshot = await tracker.cancel(task.task_id, **_owner_kwargs())
+    await running
+
+    assert snapshot is not None
+    assert snapshot.status == TaskStatus.RUNNING
+    assert snapshot.stage == "cancelling"
+    final = await tracker.get(task.task_id, **_owner_kwargs())
+    assert final is not None
+    assert final.status == TaskStatus.CANCELLED
+
+
+async def test_cancel_rejects_unsupported_task(tracker: TaskTracker):
+    task = await tracker.create("connector_import", **_owner_kwargs())
+
+    with pytest.raises(ValueError, match="does not support cancellation"):
+        await tracker.cancel(task.task_id, **_owner_kwargs())
 
 
 async def test_get_nonexistent_returns_none(tracker: TaskTracker):

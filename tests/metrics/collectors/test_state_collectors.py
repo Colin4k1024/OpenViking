@@ -55,7 +55,13 @@ def test_task_tracker_collector_maps_counts(monkeypatch):
     class DummyTracker:
         def snapshot_counts_by_type(self):
             return {
-                "session_commit": {"pending": 1, "running": 2, "completed": 3, "failed": 4},
+                "session_commit": {
+                    "pending": 1,
+                    "running": 2,
+                    "completed": 3,
+                    "failed": 4,
+                    "cancelled": 5,
+                },
             }
 
     import openviking.metrics.datasources.task as task_datasource_module
@@ -68,6 +74,7 @@ def test_task_tracker_collector_maps_counts(monkeypatch):
     assert 'openviking_task_running{task_type="session_commit"} 2.0' in text
     assert 'openviking_task_completed{task_type="session_commit"} 3.0' in text
     assert 'openviking_task_failed{task_type="session_commit"} 4.0' in text
+    assert 'openviking_task_cancelled{task_type="session_commit"} 5.0' in text
 
 
 def test_task_tracker_collector_clears_disappeared_task_types():

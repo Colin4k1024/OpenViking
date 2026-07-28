@@ -85,7 +85,7 @@ class AddResourceProcessor(DequeueHandlerBase):
             user_id=ctx.user.user_id,
             task_id=msg.task_id,
         )
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
             self.report_success()
             return None
 
@@ -129,6 +129,14 @@ class AddResourceProcessor(DequeueHandlerBase):
                     user_id=ctx.user.user_id,
                     stage="queued",
                 )
+                active_task = asyncio.current_task()
+                if active_task is not None:
+                    await tracker.register_running_task(
+                        msg.task_id,
+                        active_task,
+                        account_id=ctx.account_id,
+                        user_id=ctx.user.user_id,
+                    )
                 result = await self._resource_service.execute_add_resource_job(
                     msg,
                     ctx=ctx,
@@ -165,7 +173,22 @@ class AddResourceProcessor(DequeueHandlerBase):
                 self.report_success()
                 return None
             except asyncio.CancelledError:
-                # Leave both task and QueueFS message active; RecoverStale owns restart recovery.
+                task = await tracker.get(
+                    msg.task_id,
+                    account_id=ctx.account_id,
+                    user_id=ctx.user.user_id,
+                )
+                if task is not None and (
+                    task.status == TaskStatus.CANCELLED or task.stage == "cancelling"
+                ):
+                    await tracker.mark_cancelled(
+                        msg.task_id,
+                        account_id=ctx.account_id,
+                        user_id=ctx.user.user_id,
+                    )
+                    self.report_success()
+                    return None
+                # Shutdown cancellation leaves the message active for RecoverStale.
                 raise
             except Exception as exc:
                 await tracker.fail(
@@ -177,6 +200,7 @@ class AddResourceProcessor(DequeueHandlerBase):
                 self.report_error(str(exc), data)
                 return None
             finally:
+                tracker.unregister_running_task(msg.task_id)
                 with suppress(Exception):
                     if resource_lock is not None:
                         await resource_lock.close()

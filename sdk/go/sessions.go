@@ -136,6 +136,32 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (map[string]any, er
 	return result, nil
 }
 
+// CancelTask requests cooperative cancellation of a background task.
+func (c *Client) CancelTask(
+	ctx context.Context,
+	taskID string,
+	accountID string,
+	userID string,
+) (map[string]any, error) {
+	query := url.Values{}
+	if accountID != "" {
+		query.Set("account_id", accountID)
+	}
+	if userID != "" {
+		query.Set("user_id", userID)
+	}
+	var result map[string]any
+	err := c.doJSON(
+		ctx,
+		http.MethodPost,
+		"/api/v1/tasks/"+url.PathEscape(taskID)+"/cancel",
+		query,
+		nil,
+		&result,
+	)
+	return result, err
+}
+
 // ListTasks lists background tasks visible to the caller.
 func (c *Client) ListTasks(ctx context.Context, opts *ListTasksOptions) ([]any, error) {
 	query := url.Values{}

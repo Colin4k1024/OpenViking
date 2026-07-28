@@ -537,6 +537,14 @@ class ReindexExecutor:
     ) -> None:
         tracker = get_task_tracker()
         await tracker.start(task_id, account_id=ctx.account_id, user_id=ctx.user.user_id)
+        active_task = asyncio.current_task()
+        if active_task is not None:
+            await tracker.register_running_task(
+                task_id,
+                active_task,
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
+            )
         try:
             result = await self._run(
                 uri=uri,
@@ -551,6 +559,12 @@ class ReindexExecutor:
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
             )
+        except asyncio.CancelledError:
+            await tracker.mark_cancelled(
+                task_id,
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
+            )
         except Exception as exc:
             await tracker.fail(
                 task_id,
@@ -558,6 +572,8 @@ class ReindexExecutor:
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
             )
+        finally:
+            tracker.unregister_running_task(task_id)
 
     async def _prune_orphan_vectors(
         self,

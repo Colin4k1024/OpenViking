@@ -4319,6 +4319,14 @@ class VikingFS:
             user_id=ctx.user.user_id,
             stage="reindexing",
         )
+        active_task = asyncio.current_task()
+        if active_task is not None:
+            await tracker.register_running_task(
+                task_id,
+                active_task,
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
+            )
         try:
             from openviking.service.reindex_executor import get_reindex_executor
 
@@ -4335,6 +4343,12 @@ class VikingFS:
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
             )
+        except asyncio.CancelledError:
+            await tracker.mark_cancelled(
+                task_id,
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
+            )
         except Exception as exc:
             await tracker.fail(
                 task_id,
@@ -4342,6 +4356,8 @@ class VikingFS:
                 account_id=ctx.account_id,
                 user_id=ctx.user.user_id,
             )
+        finally:
+            tracker.unregister_running_task(task_id)
 
     async def _run_vector_rebuild(
         self,

@@ -2637,6 +2637,11 @@ class Session:
             )
             logger.info(f"Session {self.session_id} memory extraction completed")
         except asyncio.CancelledError:
+            await self._write_failed_marker(
+                archive_uri,
+                stage="cancelled",
+                error="session commit cancelled",
+            )
             raise
         except Exception as e:
             await self._write_failed_marker(

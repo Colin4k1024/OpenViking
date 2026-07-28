@@ -924,6 +924,15 @@ class LocalClient(BaseClient):
         """Query background task status."""
         return await self._service.sessions.get_commit_task(task_id, self._ctx)
 
+    async def cancel_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Cancel a background task."""
+        task = await get_task_tracker().cancel(
+            task_id,
+            account_id=self._ctx.account_id,
+            user_id=self._ctx.user.user_id,
+        )
+        return task.to_dict() if task else None
+
     async def list_tasks(
         self,
         task_type: Optional[str] = None,

@@ -1116,6 +1116,30 @@ func TestListTasksRequest(t *testing.T) {
 	}
 }
 
+func TestCancelTaskRequest(t *testing.T) {
+	client, closeServer := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if r.URL.Path != "/api/v1/tasks/task-1/cancel" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("account_id") != "acme" || r.URL.Query().Get("user_id") != "alice" {
+			t.Fatalf("query = %s", r.URL.RawQuery)
+		}
+		writeOK(t, w, map[string]any{"task_id": "task-1", "status": "cancelled"})
+	}))
+	defer closeServer()
+
+	task, err := client.CancelTask(context.Background(), "task-1", "acme", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task["status"] != "cancelled" {
+		t.Fatalf("task = %#v", task)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	client, closeServer := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
