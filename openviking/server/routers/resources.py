@@ -48,6 +48,9 @@ class AddResourceRequest(BaseModel):
         exclude: Glob pattern for files to exclude during parsing.
         directly_upload_media: Whether to directly upload media files. Default is True.
         preserve_structure: Whether to preserve directory structure when adding directories.
+        search_tags: Explicit "k=v" retrieval tags applied to every vector record
+            built for this resource, equivalent to calling set_tags after indexing
+            completes. Persisted beside the resource so rebuilds keep the tags.
         args: Parser-specific import options. For Feishu one-time user-token imports,
             pass {"feishu_access_token": "..."}. For Feishu user-token watches,
             pass {"feishu_access_token": "...", "feishu_refresh_token": "..."}.
@@ -82,6 +85,7 @@ class AddResourceRequest(BaseModel):
     exclude: Optional[str] = None
     directly_upload_media: bool = True
     preserve_structure: Optional[bool] = None
+    search_tags: Optional[list[str]] = None
     args: Dict[str, Any] = Field(default_factory=dict)
     telemetry: TelemetryRequest = False
     watch_interval: float = 0
@@ -207,6 +211,8 @@ async def add_resource(
         "directly_upload_media": request.directly_upload_media,
         "watch_interval": request.watch_interval,
     }
+    if request.search_tags is not None:
+        kwargs["search_tags"] = request.search_tags
     # Connector routing needs to distinguish an omitted create_parent from an
     # explicit false.  Standard imports still observe false when the field is
     # omitted because ResourceService reads it with kwargs.get(..., False).

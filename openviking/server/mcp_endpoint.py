@@ -575,7 +575,8 @@ async def add_resource(
         parent: Parent URI under viking://resources/ for remote imports. Mutually exclusive
             with ``to``.
         args: Parser-specific options, e.g. {"feishu_access_token": "..."} for Feishu imports,
-            or {"site": true} for whole-site ingestion.
+            {"site": true} for whole-site ingestion, or {"search_tags": ["team=infra"]} to
+            stamp "k=v" retrieval tags on every record indexed for this resource.
     """
     from openviking.server.local_input_guard import require_remote_resource_source
 

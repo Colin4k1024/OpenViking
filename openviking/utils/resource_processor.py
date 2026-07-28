@@ -399,6 +399,7 @@ class ResourceProcessor:
                 "source_committed": source_committed,
                 "target_preexisting": target_preexisting,
                 "is_code_repo": parse_result.source_format == "repository",
+                "search_tags": kwargs.get("search_tags") or None,
             }
             if defer_post_processing:
                 result["_post_process"] = prepared
@@ -440,6 +441,33 @@ class ResourceProcessor:
         build_index = bool(kwargs.get("build_index", True))
         should_summarize = summarize or build_index
         result: Dict[str, Any] = {"status": "success", "root_uri": root_uri}
+
+        # Persist add-time search tags before any semantic work is enqueued, so
+        # the vector build always finds the sidecar when it stamps records.
+        search_tags = prepared.get("search_tags") or kwargs.get("search_tags")
+        if search_tags and root_uri:
+            from openviking.storage.search_tags_sidecar import (
+                resource_root_uri_for,
+                write_search_tags_sidecar,
+            )
+
+            if resource_root_uri_for(root_uri) == root_uri.rstrip("/"):
+                try:
+                    await write_search_tags_sidecar(
+                        root_uri,
+                        list(search_tags),
+                        ctx=ctx,
+                        lock_handle=getattr(resource_lock, "handle", None),
+                    )
+                except Exception as exc:
+                    logger.error("Failed to persist search_tags for %s: %s", root_uri, exc)
+                    result.setdefault("warnings", []).append(
+                        f"Failed to persist search_tags: {exc}"
+                    )
+            else:
+                result.setdefault("warnings", []).append(
+                    "search_tags skipped: import target is not a single resource root"
+                )
 
         if should_summarize:
             stage_start = time.perf_counter()

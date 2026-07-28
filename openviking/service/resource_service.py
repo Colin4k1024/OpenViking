@@ -822,7 +822,10 @@ class ResourceService:
             enforce_public_remote_targets: When True, reject non-public remote hosts and
                 validate each outbound HTTP request URL during fetch.
             args: Parser/accessor-specific options forwarded to the processing chain.
-            **kwargs: Extra options forwarded to the parser chain
+            **kwargs: Extra options forwarded to the parser chain. ``search_tags``
+                (list of "k=v" strings) stamps explicit retrieval tags on every
+                vector record built for the resource and persists them in a
+                sidecar next to the resource root.
 
         Returns:
             Processing result containing 'root_uri' and other metadata
@@ -834,6 +837,17 @@ class ResourceService:
         self._ensure_initialized()
         normalized_args = self._normalize_add_resource_args(args, watch_interval=watch_interval)
         kwargs.update(normalized_args.processor_kwargs)
+        raw_search_tags = kwargs.get("search_tags")
+        if raw_search_tags is not None:
+            from openviking.utils.tags import normalize_search_tags
+
+            if isinstance(raw_search_tags, str) or not isinstance(raw_search_tags, (list, tuple)):
+                raise InvalidArgumentError("search_tags must be a list of 'k=v' strings")
+            normalized_tags = normalize_search_tags(raw_search_tags)
+            if normalized_tags:
+                kwargs["search_tags"] = normalized_tags
+            else:
+                kwargs.pop("search_tags")
         if watch_interval > 0 and kwargs.get("temp_file_id"):
             # Fail fast, before any ingestion: an uploaded source is a one-time
             # snapshot, so a watch on it can never observe the live source (see the
@@ -1089,6 +1103,8 @@ class ResourceService:
                     processor_args["parser_backend"] = "understanding"
                     if resolved_extension:
                         processor_args["resolved_extension"] = resolved_extension
+                    if kwargs.get("search_tags"):
+                        processor_args["search_tags"] = list(kwargs["search_tags"])
 
                     lock_handoff = lock_lease.to_handoff()
                     msg = AddResourceMsg(
@@ -1554,6 +1570,8 @@ class ResourceService:
             unsupported.append("directly_upload_media=false")
         if kwargs.get("source_name"):
             unsupported.append("source_name")
+        if kwargs.get("search_tags"):
+            unsupported.append("search_tags (Connector imports cannot apply retrieval tags yet)")
         supported_args = CONNECTOR_SUPPORTED_ARGS.get(
             add_type, frozenset()
         ) | CONNECTOR_CREDENTIAL_ARGS.get(add_type, frozenset())

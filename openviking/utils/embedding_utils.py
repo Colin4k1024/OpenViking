@@ -49,6 +49,7 @@ _PORTABLE_SCALAR_FIELDS = frozenset(
         "name",
         "description",
         "tags",
+        "search_tags",
         "abstract",
     }
 )

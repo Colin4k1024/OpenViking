@@ -1645,6 +1645,14 @@ class ReindexExecutor:
             and "search_tags" not in merged_meta
         ):
             merged_meta["search_tags"] = existing.get("search_tags")
+        if "search_tags" not in merged_meta:
+            # No live record to inherit from (e.g. rebuild after a collection
+            # drop): fall back to the add-time sidecar.
+            from openviking.storage.search_tags_sidecar import load_search_tags_for_uri
+
+            sidecar_tags = await load_search_tags_for_uri(uri, ctx=owner_ctx)
+            if sidecar_tags:
+                merged_meta["search_tags"] = sidecar_tags
 
         context = Context(
             uri=uri,
@@ -1666,6 +1674,10 @@ class ReindexExecutor:
                 code="FAILED_PRECONDITION",
                 details={"uri": uri},
             )
+        if merged_meta.get("search_tags") is not None:
+            # ``meta`` is not a collection schema field, so nested tags are
+            # dropped at upsert; stamp the top-level record field explicitly.
+            msg.context_data["search_tags"] = merged_meta["search_tags"]
         wait_tracker = get_request_wait_tracker()
         wait_tracker.register_embedding_root(msg.telemetry_id, msg.id)
         enqueued = await service.vikingdb_manager.enqueue_embedding_msg(msg)

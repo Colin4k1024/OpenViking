@@ -1542,9 +1542,16 @@ class SemanticProcessor(DequeueHandlerBase):
     ) -> None:
         """Create directory Context and enqueue to EmbeddingQueue."""
 
+        from openviking.storage.search_tags_sidecar import load_search_tags_for_uri
         from openviking.utils.embedding_utils import vectorize_directory_meta
 
         active_ctx = ctx or self._default_ctx
+        sidecar_tags = await load_search_tags_for_uri(uri, ctx=active_ctx)
+        scalar_overrides = (
+            {0: {"search_tags": sidecar_tags}, 1: {"search_tags": sidecar_tags}}
+            if sidecar_tags
+            else None
+        )
         await vectorize_directory_meta(
             uri=uri,
             abstract=abstract,
@@ -1552,6 +1559,7 @@ class SemanticProcessor(DequeueHandlerBase):
             context_type=context_type,
             ctx=active_ctx,
             semantic_msg_id=semantic_msg_id,
+            scalar_overrides=scalar_overrides,
         )
 
     async def _vectorize_single_file(
@@ -1566,9 +1574,11 @@ class SemanticProcessor(DequeueHandlerBase):
         preserve_existing_created_at: bool = False,
     ) -> None:
         """Vectorize a single file using its content or summary."""
+        from openviking.storage.search_tags_sidecar import load_search_tags_for_uri
         from openviking.utils.embedding_utils import vectorize_file
 
         active_ctx = ctx or self._default_ctx
+        sidecar_tags = await load_search_tags_for_uri(file_path, ctx=active_ctx)
         await vectorize_file(
             file_path=file_path,
             summary_dict=summary_dict,
@@ -1578,4 +1588,5 @@ class SemanticProcessor(DequeueHandlerBase):
             semantic_msg_id=semantic_msg_id,
             use_summary=use_summary,
             preserve_existing_created_at=preserve_existing_created_at,
+            scalar_override={"search_tags": sidecar_tags} if sidecar_tags else None,
         )
