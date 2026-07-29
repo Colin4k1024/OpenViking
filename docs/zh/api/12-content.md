@@ -221,6 +221,7 @@ openviking read viking://resources/docs/api.md
 | mode | str | 否 | `replace` | `replace`、`append` 或 `create` |
 | wait | bool | 否 | `false` | 是否等待后台语义/向量刷新完成 |
 | timeout | float | 否 | `null` | 当 `wait=true` 时的超时时间（秒） |
+| processing_mode | str | 否 | `semantic_and_vectors` | 写入后的处理模式：`semantic_and_vectors` 或 `vectors_only` |
 
 **说明**
 
@@ -228,7 +229,10 @@ openviking read viking://resources/docs/api.md
 - `create` 只允许以下文本类扩展名：`.md`、`.txt`、`.json`、`.yaml`、`.yml`、`.toml`、`.py`、`.js`、`.ts`。父目录会自动创建。
 - 不允许直接写入派生语义文件：`.abstract.md`、`.overview.md`、`.relations.json`。
 - 文件内容会在 API 返回前完成更新；`wait` 只控制是否等待语义/向量刷新完成。
-- 公共 API 已不再接受 `regenerate_semantics` 或 `revectorize`；写入后一定会自动刷新相关语义与向量。
+- 默认 `processing_mode="semantic_and_vectors"` 会保持原有行为：写入资源或技能文件后刷新相关语义与向量。
+- `processing_mode="vectors_only"` 适用于只希望更新向量索引、不触发 VLM 语义理解的场景。资源和技能文件会跳过语义刷新，只对本次写入的文件生成向量；响应中 `semantic_status` 为 `skipped`。
+- memory 写入接受 `processing_mode` 字段以保持接口一致，但仍按原有 memory schema overview 与 embedding 刷新逻辑处理。
+- 公共 API 已不再接受 `regenerate_semantics` 或 `revectorize`；写入后的处理行为由 `processing_mode` 控制。
 
 
 **Python SDK**
@@ -238,6 +242,7 @@ result = client.write(
     "viking://resources/docs/api.md",
     "# Updated API\n\nFresh content.",
     mode="replace",
+    processing_mode="vectors_only",
     wait=True,
 )
 print(result["root_uri"])
@@ -246,7 +251,10 @@ print(result["root_uri"])
 **TypeScript SDK**
 
 ```typescript
-await client.write("viking://resources/docs/new.md", "# New document\n", { wait: true });
+await client.write("viking://resources/docs/new.md", "# New document\n", {
+  processingMode: "vectors_only",
+  wait: true,
+});
 ```
 
 **Go SDK**
@@ -281,6 +289,7 @@ curl -X POST "http://localhost:1933/api/v1/content/write" \
     "uri": "viking://resources/docs/api.md",
     "content": "# Updated API\n\nFresh content.",
     "mode": "replace",
+    "processing_mode": "vectors_only",
     "wait": true
   }'
 ```
@@ -290,6 +299,7 @@ curl -X POST "http://localhost:1933/api/v1/content/write" \
 ```bash
 openviking write viking://resources/docs/api.md \
   --content "# Updated API\n\nFresh content." \
+  --processing-mode vectors_only \
   --wait
 ```
 

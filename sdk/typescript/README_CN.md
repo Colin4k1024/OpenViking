@@ -34,6 +34,19 @@ await client.addResource("./docs/guide.md", {
 });
 ```
 
+`write` 对资源和技能文件也支持同一个处理模式：
+
+```ts
+await client.write(
+  "viking://resources/guide/guide.md",
+  "# Guide\n\nUpdated content.",
+  {
+    processingMode: "vectors_only",
+    wait: true,
+  },
+);
+```
+
 使用共享临时存储的部署可设置 `uploadMode: "shared"`；服务端也接受 `"local"`（默认值）。
 
 OVPack 导出和备份与 Python、Go SDK 契约一致：内容会流式写入 Node.js 本地文件，并返回最终文件路径。

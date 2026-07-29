@@ -34,6 +34,19 @@ await client.addResource("./docs/guide.md", {
 });
 ```
 
+`write` supports the same processing mode for resource and skill files:
+
+```ts
+await client.write(
+  "viking://resources/guide/guide.md",
+  "# Guide\n\nUpdated content.",
+  {
+    processingMode: "vectors_only",
+    wait: true,
+  },
+);
+```
+
 Deployments using shared temporary storage can set `uploadMode: "shared"`; the server also accepts `"local"` (the default).
 
 OVPack exports and backups follow the Python and Go SDK contract: they are streamed to a Node.js local file and return its final path.

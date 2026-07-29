@@ -221,6 +221,7 @@ Update an existing file, or create a new one when `mode="create"`, and automatic
 | mode | str | No | `replace` | `replace`, `append`, or `create` |
 | wait | bool | No | `false` | Wait for background semantic/vector refresh |
 | timeout | float | No | `null` | Timeout in seconds when `wait=true` |
+| processing_mode | str | No | `semantic_and_vectors` | Post-write processing mode: `semantic_and_vectors` or `vectors_only` |
 
 **Notes**
 
@@ -228,7 +229,10 @@ Update an existing file, or create a new one when `mode="create"`, and automatic
 - `create` only accepts text-writable extensions: `.md`, `.txt`, `.json`, `.yaml`, `.yml`, `.toml`, `.py`, `.js`, `.ts`. Parent directories are created automatically.
 - Derived semantic files cannot be written directly: `.abstract.md`, `.overview.md`, `.relations.json`.
 - File content is updated before the API returns. `wait` only controls whether the call waits for semantic/vector refresh to finish.
-- The public API no longer accepts `regenerate_semantics` or `revectorize`; write always refreshes related semantics and vectors.
+- The default `processing_mode="semantic_and_vectors"` keeps the existing behavior: resource and skill writes refresh related semantics and vectors.
+- `processing_mode="vectors_only"` is for updating vector indexes without VLM semantic understanding. Resource and skill writes skip semantic refresh and only vectorize the written file; the response has `semantic_status="skipped"`.
+- Memory writes accept `processing_mode` for API consistency, but still use the existing memory schema overview and embedding refresh flow.
+- The public API no longer accepts `regenerate_semantics` or `revectorize`; post-write processing is controlled by `processing_mode`.
 
 
 **Python SDK**
@@ -238,6 +242,7 @@ result = client.write(
     "viking://resources/docs/api.md",
     "# Updated API\n\nFresh content.",
     mode="replace",
+    processing_mode="vectors_only",
     wait=True,
 )
 print(result["root_uri"])
@@ -246,7 +251,10 @@ print(result["root_uri"])
 **TypeScript SDK**
 
 ```typescript
-await client.write("viking://resources/docs/new.md", "# New document\n", { wait: true });
+await client.write("viking://resources/docs/new.md", "# New document\n", {
+  processingMode: "vectors_only",
+  wait: true,
+});
 ```
 
 **Go SDK**
@@ -281,6 +289,7 @@ curl -X POST "http://localhost:1933/api/v1/content/write" \
     "uri": "viking://resources/docs/api.md",
     "content": "# Updated API\n\nFresh content.",
     "mode": "replace",
+    "processing_mode": "vectors_only",
     "wait": true
   }'
 ```
@@ -290,6 +299,7 @@ curl -X POST "http://localhost:1933/api/v1/content/write" \
 ```bash
 openviking write viking://resources/docs/api.md \
   --content "# Updated API\n\nFresh content." \
+  --processing-mode vectors_only \
   --wait
 ```
 

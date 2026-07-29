@@ -572,6 +572,14 @@ enum Commands {
         /// Wait for async processing to finish
         #[arg(long, default_value = "false", help_heading = "Common options")]
         wait: bool,
+        /// Content post-write processing mode
+        #[arg(
+            long = "processing-mode",
+            default_value = "semantic_and_vectors",
+            value_parser = ["semantic_and_vectors", "vectors_only"],
+            help_heading = "Advanced options"
+        )]
+        processing_mode: String,
         /// Optional wait timeout in seconds
         #[arg(long, value_name = "seconds", help_heading = "Common options")]
         timeout: Option<f64>,
@@ -3219,6 +3227,7 @@ async fn main() {
             append,
             mode,
             wait,
+            processing_mode,
             timeout,
         } => {
             let effective_mode = if let Some(m) = mode {
@@ -3228,8 +3237,17 @@ async fn main() {
             } else {
                 "replace".to_string()
             };
-            handlers::handle_write(uri, content, from_file, effective_mode, wait, timeout, ctx)
-                .await
+            handlers::handle_write(
+                uri,
+                content,
+                from_file,
+                effective_mode,
+                wait,
+                timeout,
+                processing_mode,
+                ctx,
+            )
+            .await
         }
         Commands::SetTags {
             uri,

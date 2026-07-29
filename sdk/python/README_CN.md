@@ -178,6 +178,17 @@ result = client.add_resource(
 )
 ```
 
+`write` 对资源和技能文件也支持同一个处理模式。适合只更新文件内容和向量、不通过 VLM 阶段刷新语义产物的场景。
+
+```python
+result = client.write(
+    "viking://resources/demo-notes/notes.md",
+    "# Notes\n\nUpdated content.",
+    processing_mode="vectors_only",
+    wait=True,
+)
+```
+
 ### 文件系统操作
 
 ```python

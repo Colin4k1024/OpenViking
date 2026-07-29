@@ -179,6 +179,19 @@ result = client.add_resource(
 )
 ```
 
+`write` supports the same processing mode for resource and skill files. Use it when
+you only want to update the file content and vectors, without refreshing semantic
+artifacts through the VLM stage.
+
+```python
+result = client.write(
+    "viking://resources/demo-notes/notes.md",
+    "# Notes\n\nUpdated content.",
+    processing_mode="vectors_only",
+    wait=True,
+)
+```
+
 ### Filesystem Operations
 
 ```python

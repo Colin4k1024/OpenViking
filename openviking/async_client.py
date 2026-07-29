@@ -671,6 +671,7 @@ class AsyncOpenViking:
         wait: bool = False,
         timeout: Optional[float] = None,
         telemetry: TelemetryRequest = False,
+        processing_mode: str = "semantic_and_vectors",
     ) -> Dict[str, Any]:
         """Write text content to an existing file and refresh semantics/vectors."""
         await self._ensure_initialized()
@@ -681,6 +682,7 @@ class AsyncOpenViking:
             wait=wait,
             timeout=timeout,
             telemetry=telemetry,
+            processing_mode=processing_mode,
         )
 
     async def set_tags(

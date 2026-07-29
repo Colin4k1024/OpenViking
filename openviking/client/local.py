@@ -644,6 +644,7 @@ class LocalClient(BaseClient):
         wait: bool = False,
         timeout: Optional[float] = None,
         telemetry: TelemetryRequest = False,
+        processing_mode: str = "semantic_and_vectors",
     ) -> Dict[str, Any]:
         """Write text content to an existing file and refresh semantics/vectors."""
         execution = await run_with_telemetry(
@@ -656,6 +657,7 @@ class LocalClient(BaseClient):
                 mode=mode,
                 wait=wait,
                 timeout=timeout,
+                processing_mode=processing_mode,
             ),
         )
         return attach_telemetry_payload(
