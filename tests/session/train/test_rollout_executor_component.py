@@ -957,11 +957,12 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
             assert uri is None
             return "viking://user/u/memories"
 
-        async def search(self, situation, *, target_uri, limit):
+        async def search(self, situation, *, target_uri, limit, score_threshold=None):
             observed.update(
                 situation=situation,
                 target_uri=target_uri,
                 limit=limit,
+                score_threshold=score_threshold,
             )
             return {"memories": []}
 
@@ -991,6 +992,7 @@ async def test_tau2_search_experience_uses_declarative_situation(monkeypatch):
         "situation": "The user wants to cancel all upcoming reservations.",
         "target_uri": "viking://user/u/memories/cases",
         "limit": 10,
+        "score_threshold": 0.0,
         "closed": True,
     }
     assert payload == {
@@ -1027,8 +1029,8 @@ async def test_tau2_search_experience_case_ann_searches_ten_and_expands_default_
             assert uri is None
             return "viking://user/u/memories"
 
-        async def search(self, situation, *, target_uri, limit):
-            self.search_calls.append((situation, target_uri, limit))
+        async def search(self, situation, *, target_uri, limit, score_threshold=None):
+            self.search_calls.append((situation, target_uri, limit, score_threshold))
             return {
                 "memories": [
                     {
@@ -1068,6 +1070,7 @@ async def test_tau2_search_experience_case_ann_searches_ten_and_expands_default_
             "A ranked airline request",
             "viking://user/u/memories/cases",
             10,
+            0.0,
         )
     ]
     assert [candidate["case_name"] for candidate in payload["candidates"]] == [
@@ -1566,8 +1569,8 @@ async def test_tau2_search_experience_falls_back_when_task_signature_case_file_i
                 return "# semantic_case\n\n## Linked Experiences\n"
             return ""
 
-        async def search(self, situation, *, target_uri, limit):
-            self.search_calls.append((situation, target_uri, limit))
+        async def search(self, situation, *, target_uri, limit, score_threshold=None):
+            self.search_calls.append((situation, target_uri, limit, score_threshold))
             return {"memories": [{"uri": semantic_case_uri, "score": 0.8}]}
 
         async def close(self):
@@ -1596,6 +1599,7 @@ async def test_tau2_search_experience_falls_back_when_task_signature_case_file_i
             "The user wants to cancel all upcoming reservations.",
             "viking://user/u/memories/cases",
             10,
+            0.0,
         )
     ]
 
@@ -1633,7 +1637,8 @@ async def test_tau2_search_experience_deduplicates_experiences_across_semantic_c
                 return "## Situation\n- Applies to both cases\n"
             return ""
 
-        async def search(self, situation, *, target_uri, limit):
+        async def search(self, situation, *, target_uri, limit, score_threshold=None):
+            assert score_threshold == 0.0
             return {"memories": [{"uri": uri, "score": 0.9} for uri in case_uris]}
 
         async def close(self):

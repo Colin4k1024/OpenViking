@@ -372,6 +372,7 @@ def _make_search_experience_tool(
                         situation,
                         target_uri=cases_uri,
                         limit=_TAU2_CASE_SEARCH_LIMIT,
+                        score_threshold=0.0,
                     )
                     memories = result.get("memories", []) if isinstance(result, dict) else []
                     candidates = list(
