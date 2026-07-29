@@ -12,6 +12,7 @@ import time
 import traceback
 from typing import Any, Dict, Optional, Set, Union
 
+from openviking.service.task_work_index import TaskWorkIndex
 from openviking_cli.utils.logger import get_logger
 
 from .embedding_queue import EmbeddingQueue
@@ -96,6 +97,7 @@ class QueueManager:
         self._queue_threads: Dict[str, threading.Thread] = {}
         self._queue_stop_events: Dict[str, threading.Event] = {}
         self._poll_interval = 0.2
+        self._task_work_index = TaskWorkIndex()
 
         atexit.register(self.stop)
         logger.info(
@@ -114,6 +116,14 @@ class QueueManager:
             self._start_queue_worker(queue)
 
         logger.info(f"[QueueManager] mount_point={self.mount_point} Started")
+
+    async def prepare_task_tracking(self, tracker: Any) -> None:
+        """Rebuild task work from QueueFS before any consumer starts."""
+        snapshots = {name: await queue.snapshot() for name, queue in self._queues.items()}
+        self._task_work_index.rebuild(snapshots)
+        tracker.attach_work_index(self._task_work_index)
+        await tracker.restore_work_tasks(self._task_work_index.owners())
+        await tracker.reconcile_cancellations()
 
     def setup_standard_queues(self, vector_store: Any, start: bool = True) -> None:
         """
@@ -226,7 +236,7 @@ class QueueManager:
                 try:
                     await queue.process_dequeued(data)
                     # Ack after successful processing (delete from persistent storage).
-                    await queue.ack(msg_id)
+                    await queue.ack(msg_id, data)
                 except Exception as e:
                     # Handler did not call report_error; decrement in_progress manually.
                     # Do NOT ack — let RecoverStale re-queue on next startup.
@@ -323,6 +333,7 @@ class QueueManager:
                     name,
                     enqueue_hook=enqueue_hook,
                     dequeue_handler=dequeue_handler,
+                    task_work_index=self._task_work_index,
                 )
             elif name == self.SEMANTIC:
                 self._queues[name] = SemanticQueue(
@@ -331,6 +342,7 @@ class QueueManager:
                     name,
                     enqueue_hook=enqueue_hook,
                     dequeue_handler=dequeue_handler,
+                    task_work_index=self._task_work_index,
                 )
             else:
                 self._queues[name] = NamedQueue(
@@ -339,6 +351,7 @@ class QueueManager:
                     name,
                     enqueue_hook=enqueue_hook,
                     dequeue_handler=dequeue_handler,
+                    task_work_index=self._task_work_index,
                 )
             if self._started:
                 self._start_queue_worker(self._queues[name])

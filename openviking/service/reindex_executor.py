@@ -26,6 +26,7 @@ from openviking.core.namespace import (
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext
 from openviking.service.task_tracker import get_task_tracker
+from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.storage.expr import And, Eq, Or, PathScope
 from openviking.storage.queuefs.embedding_msg_converter import EmbeddingMsgConverter
@@ -546,13 +547,14 @@ class ReindexExecutor:
                 user_id=ctx.user.user_id,
             )
         try:
-            result = await self._run(
-                uri=uri,
-                object_type=object_type,
-                mode=mode,
-                dry_run=dry_run,
-                ctx=ctx,
-            )
+            with bind_task_context(task_id, ctx.account_id, ctx.user.user_id):
+                result = await self._run(
+                    uri=uri,
+                    object_type=object_type,
+                    mode=mode,
+                    dry_run=dry_run,
+                    ctx=ctx,
+                )
             await tracker.complete(
                 task_id,
                 result,
@@ -560,11 +562,8 @@ class ReindexExecutor:
                 user_id=ctx.user.user_id,
             )
         except asyncio.CancelledError:
-            await tracker.mark_cancelled(
-                task_id,
-                account_id=ctx.account_id,
-                user_id=ctx.user.user_id,
-            )
+            # TaskWorkIndex finalizes after this active task and its queue work settle.
+            return
         except Exception as exc:
             await tracker.fail(
                 task_id,

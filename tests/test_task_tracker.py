@@ -20,6 +20,11 @@ from openviking.service.task_tracker import (
     get_task_tracker,
     set_task_tracker,
 )
+from openviking.service.task_work_index import (
+    TASK_WORK_ID_FIELD,
+    QueueTaskMetadata,
+    TaskWorkIndex,
+)
 from openviking_cli.session.user_id import UserIdentifier
 
 pytestmark = pytest.mark.asyncio
@@ -223,7 +228,7 @@ async def test_cancel_running_interrupts_registered_task(tracker: TaskTracker):
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            await tracker.mark_cancelled(task.task_id, **_owner_kwargs())
+            pass
         finally:
             tracker.unregister_running_task(task.task_id)
 
@@ -231,13 +236,80 @@ async def test_cancel_running_interrupts_registered_task(tracker: TaskTracker):
     await started.wait()
     snapshot = await tracker.cancel(task.task_id, **_owner_kwargs())
     await running
+    await asyncio.sleep(0)
 
     assert snapshot is not None
-    assert snapshot.status == TaskStatus.RUNNING
-    assert snapshot.stage == "cancelling"
+    assert snapshot.status == TaskStatus.CANCELLING
     final = await tracker.get(task.task_id, **_owner_kwargs())
     assert final is not None
     assert final.status == TaskStatus.CANCELLED
+
+
+async def test_cancel_waits_for_all_durable_work(tracker: TaskTracker):
+    task = await tracker.create("add_resource", **_owner_kwargs())
+    work_index = TaskWorkIndex()
+    tracker.attach_work_index(work_index)
+    first = QueueTaskMetadata(task.task_id, "semantic", "acme", "alice")
+    second = QueueTaskMetadata(task.task_id, "embedding", "acme", "alice")
+    work_index.register("Semantic", first)
+    work_index.register("Embedding", second)
+
+    cancelling = await tracker.cancel(task.task_id, **_owner_kwargs())
+    assert cancelling is not None
+    assert cancelling.status == TaskStatus.CANCELLING
+    repeated = await tracker.cancel(task.task_id, **_owner_kwargs())
+    assert repeated is not None
+    assert repeated.status == TaskStatus.CANCELLING
+
+    work_index.settle("Semantic", first)
+    await asyncio.sleep(0)
+    assert (await tracker.get(task.task_id, **_owner_kwargs())).status == TaskStatus.CANCELLING
+
+    work_index.settle("Embedding", second)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert (await tracker.get(task.task_id, **_owner_kwargs())).status == TaskStatus.CANCELLED
+
+
+async def test_cancelling_task_resumes_from_rebuilt_queue_work():
+    agfs = _FakeAgfs()
+    first_tracker = TaskTracker(store=PersistentTaskStore(agfs))
+    task = await first_tracker.create("add_resource", **_owner_kwargs())
+    first_index = TaskWorkIndex()
+    first_tracker.attach_work_index(first_index)
+    metadata = QueueTaskMetadata(task.task_id, "work-1", "acme", "alice")
+    first_index.register("Semantic", metadata)
+    await first_tracker.cancel(task.task_id, **_owner_kwargs())
+
+    envelope = {
+        "id": "queue-id",
+        "data": json.dumps(
+            {
+                "task_id": task.task_id,
+                TASK_WORK_ID_FIELD: "work-1",
+                "account_id": "acme",
+                "user_id": "alice",
+            }
+        ),
+    }
+    rebuilt_index = TaskWorkIndex()
+    rebuilt_index.rebuild({"Semantic": [envelope]})
+    restored_tracker = TaskTracker(store=PersistentTaskStore(agfs))
+    restored_tracker.attach_work_index(rebuilt_index)
+    await restored_tracker.restore_work_tasks(rebuilt_index.owners())
+    await restored_tracker.reconcile_cancellations()
+
+    restored = await restored_tracker.get(task.task_id, **_owner_kwargs())
+    assert restored is not None
+    assert restored.status == TaskStatus.CANCELLING
+    assert rebuilt_index.cancellation_requested(task.task_id)
+
+    rebuilt_index.settle("Semantic", envelope)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    restored = await restored_tracker.get(task.task_id, **_owner_kwargs())
+    assert restored is not None
+    assert restored.status == TaskStatus.CANCELLED
 
 
 async def test_cancel_rejects_unsupported_task(tracker: TaskTracker):

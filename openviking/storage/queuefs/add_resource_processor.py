@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from openviking.observability.context import bind_execution_context
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
+from openviking.service.task_work_index import bind_task_context
 from openviking.storage.queuefs.add_resource_msg import AddResourceMsg
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.telemetry import bind_telemetry, resolve_telemetry
@@ -23,6 +24,8 @@ logger = get_logger(__name__)
 
 class AddResourceProcessor(DequeueHandlerBase):
     """Own an add-resource task until it reaches a terminal state and can be ACKed."""
+
+    manages_active_task = True
 
     def __init__(
         self,
@@ -52,6 +55,19 @@ class AddResourceProcessor(DequeueHandlerBase):
                 )
             except Exception:
                 raise handoff_error
+
+    async def _release_cancelled_handoff(self, msg: AddResourceMsg) -> None:
+        if msg.lock_handoff is None:
+            return
+        from openviking.storage.transaction.lock_lease import LockHandoffRef, OwnedLockLease
+
+        try:
+            ref = LockHandoffRef.from_value(msg.lock_handoff)
+            if ref is not None:
+                lock = await OwnedLockLease.from_handoff(ref)
+                await lock.close()
+        except Exception as exc:
+            logger.warning("[AddResource] Failed to release cancelled lock handoff: %s", exc)
 
     async def _requeue_lock_handoff(self, msg: AddResourceMsg, exc: Exception) -> bool:
         if msg.lock_handoff_retry >= 2:
@@ -85,7 +101,14 @@ class AddResourceProcessor(DequeueHandlerBase):
             user_id=ctx.user.user_id,
             task_id=msg.task_id,
         )
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+        if task.status in (
+            TaskStatus.CANCELLING,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ):
+            if task.status in (TaskStatus.CANCELLING, TaskStatus.CANCELLED):
+                await self._release_cancelled_handoff(msg)
             self.report_success()
             return None
 
@@ -121,7 +144,11 @@ class AddResourceProcessor(DequeueHandlerBase):
                 user_id=ctx.user.user_id,
             )
 
-        with bind_execution_context(), bind_telemetry(telemetry):
+        with (
+            bind_execution_context(),
+            bind_telemetry(telemetry),
+            bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id),
+        ):
             try:
                 await tracker.start(
                     msg.task_id,
@@ -178,14 +205,10 @@ class AddResourceProcessor(DequeueHandlerBase):
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
                 )
-                if task is not None and (
-                    task.status == TaskStatus.CANCELLED or task.stage == "cancelling"
+                if task is not None and task.status in (
+                    TaskStatus.CANCELLING,
+                    TaskStatus.CANCELLED,
                 ):
-                    await tracker.mark_cancelled(
-                        msg.task_id,
-                        account_id=ctx.account_id,
-                        user_id=ctx.user.user_id,
-                    )
                     self.report_success()
                     return None
                 # Shutdown cancellation leaves the message active for RecoverStale.
@@ -204,6 +227,24 @@ class AddResourceProcessor(DequeueHandlerBase):
                 with suppress(Exception):
                     if resource_lock is not None:
                         await resource_lock.close()
+
+    async def on_cancelled(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Release an enqueue-time lock before ACKing cancelled work."""
+        try:
+            payload = data.get("data", data) if isinstance(data, dict) else data
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            msg = AddResourceMsg.from_dict(payload)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self.report_error(str(exc), data)
+            return None
+        future = asyncio.run_coroutine_threadsafe(
+            self._release_cancelled_handoff(msg),
+            self._service_loop,
+        )
+        await asyncio.wrap_future(future)
+        self.report_success()
+        return None
 
     async def on_dequeue(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not data:
