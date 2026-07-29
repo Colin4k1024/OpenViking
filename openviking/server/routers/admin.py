@@ -35,7 +35,6 @@ from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.exceptions import (
     FailedPreconditionError,
     InvalidArgumentError,
-    OpenVikingError,
     PermissionDeniedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
@@ -326,13 +325,6 @@ async def register_user(
     )
     _validate_initial_user_config(service, user_ctx, body.user_config)
     manager = _get_api_key_manager(request)
-    deletion = manager.get_user_deletion(account_id, body.user_id)
-    if deletion:
-        raise OpenVikingError(
-            f"User '{body.user_id}' is being deleted",
-            code="CONFLICT",
-            details={"task_id": deletion["task_id"]},
-        )
     user_key = await manager.register_user(
         account_id,
         body.user_id,
@@ -381,8 +373,6 @@ async def remove_user(
     """Revoke a user immediately and queue private-data cleanup."""
     _check_account_access(ctx, account_id)
     manager = _get_api_key_manager(request)
-    if manager is None:
-        raise FailedPreconditionError("User management is not configured")
 
     owner_account_id = ctx.account_id
     owner_user_id = ctx.user.user_id

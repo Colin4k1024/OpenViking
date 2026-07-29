@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import time
 from typing import Any, Optional
@@ -161,7 +160,6 @@ class UserDeletionProcessor(DequeueHandlerBase):
             self.report_success()
             return
 
-        removed = False
         try:
             await tracker.start(task_id, stage="stopping_watches", **owner)
             await self._delete_watches(target_account_id, target_user_id)
@@ -187,14 +185,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
                 target_user_id,
                 task_id,
             )
-            if not removed:
-                self.report_success()
-                return
-            await tracker.complete(task_id, **owner)
-            self.report_success()
         except Exception as exc:
-            if removed:
-                raise
             await tracker.fail(task_id, str(exc), **owner)
             self.report_error(str(exc), raw)
             logger.exception(
@@ -202,6 +193,13 @@ class UserDeletionProcessor(DequeueHandlerBase):
                 target_account_id,
                 target_user_id,
             )
+            return
+
+        if removed:
+            # Leave the message unacked if persisting completion fails. On retry,
+            # the missing fence takes the idempotent completion path above.
+            await tracker.complete(task_id, **owner)
+        self.report_success()
 
     async def on_dequeue(self, data: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         if not data:
@@ -224,7 +222,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
             self.report_error(str(exc), data)
             return None
 
-        future: concurrent.futures.Future[None] = asyncio.run_coroutine_threadsafe(
+        future = asyncio.run_coroutine_threadsafe(
             self._process(message, data),
             self._service_loop,
         )
