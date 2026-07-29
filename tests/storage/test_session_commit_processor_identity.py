@@ -57,7 +57,7 @@ def _make_msg() -> SessionCommitMsg:
 def _task_tracker():
     return SimpleNamespace(
         create=AsyncMock(return_value=SimpleNamespace(status=TaskStatus.PENDING)),
-        register_running_task=AsyncMock(),
+        register_running_task=Mock(),
         unregister_running_task=Mock(),
         fail=AsyncMock(),
     )

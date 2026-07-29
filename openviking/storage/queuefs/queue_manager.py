@@ -119,10 +119,9 @@ class QueueManager:
     async def prepare_task_tracking(self, tracker: Any) -> None:
         """Rebuild task work from QueueFS before any consumer starts."""
         snapshots = {name: await queue.snapshot() for name, queue in self._queues.items()}
-        self._task_work_index.rebuild(snapshots)
+        owners = self._task_work_index.rebuild(snapshots)
         tracker.attach_work_index(self._task_work_index)
-        await tracker.restore_work_tasks(self._task_work_index.owners())
-        await tracker.reconcile_cancellations()
+        await tracker.restore_work_tasks(owners)
 
     def setup_standard_queues(self, vector_store: Any, start: bool = True) -> None:
         """

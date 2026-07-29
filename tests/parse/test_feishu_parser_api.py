@@ -787,7 +787,7 @@ async def test_add_resource_processor_persists_final_resource_uri(monkeypatch):
         update_stage=AsyncMock(),
         complete=AsyncMock(),
         fail=AsyncMock(),
-        register_running_task=AsyncMock(),
+        register_running_task=Mock(),
         unregister_running_task=Mock(),
     )
     monkeypatch.setattr(

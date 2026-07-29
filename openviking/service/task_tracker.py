@@ -188,28 +188,19 @@ class TaskTracker:
         self._install_work_index_callbacks()
 
     async def restore_work_tasks(self, owners: Dict[str, tuple[str, str]]) -> None:
-        """Load task records referenced by rebuilt QueueFS work into the local cache."""
+        """Restore task records referenced by rebuilt QueueFS work."""
         for task_id, (account_id, user_id) in owners.items():
-            await self.get(task_id, account_id=account_id, user_id=user_id)
+            task = await self.get(task_id, account_id=account_id, user_id=user_id)
+            if task is not None and task.status == TaskStatus.CANCELLING:
+                await self._finalize_cancellation(task_id)
 
-    def _on_task_work_idle(
-        self,
-        task_id: str,
-        owner: Optional[tuple[str, str]],
-    ) -> None:
+    def _on_task_work_idle(self, task_id: str) -> None:
         loop = self._runtime_loop
         if loop is None or loop.is_closed():
             return
-        account_id, user_id = owner or (None, None)
 
         def _schedule() -> None:
-            asyncio.create_task(
-                self._finalize_cancellation(
-                    task_id,
-                    account_id=account_id,
-                    user_id=user_id,
-                )
-            )
+            asyncio.create_task(self._finalize_cancellation(task_id))
 
         loop.call_soon_threadsafe(_schedule)
 
@@ -220,21 +211,6 @@ class TaskTracker:
             return task is not None and task.status in (
                 TaskStatus.CANCELLING,
                 TaskStatus.CANCELLED,
-            )
-
-    async def reconcile_cancellations(self) -> None:
-        """Finalize rebuilt cancelling tasks that no longer own queue work."""
-        with self._lock:
-            cancelling = [
-                (task.task_id, task.account_id, task.user_id)
-                for task in self._tasks.values()
-                if task.status == TaskStatus.CANCELLING
-            ]
-        for task_id, account_id, user_id in cancelling:
-            await self._finalize_cancellation(
-                task_id,
-                account_id=account_id,
-                user_id=user_id,
             )
 
     def start_cleanup_loop(self) -> None:
@@ -562,17 +538,14 @@ class TaskTracker:
                 with self._lock:
                     self._tasks[task.task_id] = task
 
-    async def register_running_task(
+    def register_running_task(
         self,
         task_id: str,
         active_task: asyncio.Task,
-        account_id: Optional[str] = None,
-        user_id: Optional[str] = None,
     ) -> None:
         """Register an asyncio task so a running cancellation can interrupt it."""
         self._runtime_loop = self._runtime_loop or asyncio.get_running_loop()
-        owner = (account_id, user_id) if account_id and user_id else None
-        self._work_index.register_active(task_id, active_task, owner)
+        self._work_index.register_active(task_id, active_task)
 
     def unregister_running_task(
         self,

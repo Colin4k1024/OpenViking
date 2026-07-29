@@ -223,7 +223,7 @@ async def test_cancel_running_interrupts_registered_task(tracker: TaskTracker):
         await tracker.start(task.task_id, **_owner_kwargs())
         current = asyncio.current_task()
         assert current is not None
-        await tracker.register_running_task(task.task_id, current, **_owner_kwargs())
+        tracker.register_running_task(task.task_id, current)
         started.set()
         try:
             await asyncio.Event().wait()
@@ -293,11 +293,10 @@ async def test_cancelling_task_resumes_from_rebuilt_queue_work():
         ),
     }
     rebuilt_index = TaskWorkIndex()
-    rebuilt_index.rebuild({"Semantic": [envelope]})
+    owners = rebuilt_index.rebuild({"Semantic": [envelope]})
     restored_tracker = TaskTracker(store=PersistentTaskStore(agfs))
     restored_tracker.attach_work_index(rebuilt_index)
-    await restored_tracker.restore_work_tasks(rebuilt_index.owners())
-    await restored_tracker.reconcile_cancellations()
+    await restored_tracker.restore_work_tasks(owners)
 
     restored = await restored_tracker.get(task.task_id, **_owner_kwargs())
     assert restored is not None

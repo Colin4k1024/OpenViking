@@ -150,7 +150,7 @@ def extract_task_metadata(message: Any) -> Optional[QueueTaskMetadata]:
     return QueueTaskMetadata(str(task_id), str(work_id), account_id, user_id)
 
 
-IdleCallback = Callable[[str, Optional[tuple[str, str]]], None]
+IdleCallback = Callable[[str], None]
 CancellationCheck = Callable[[str], bool]
 
 
@@ -160,11 +160,7 @@ class TaskWorkIndex:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._work: Dict[str, set[tuple[str, str]]] = {}
-        self._active: Dict[
-            str,
-            Dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]],
-        ] = {}
-        self._owners: Dict[str, tuple[str, str]] = {}
+        self._active: Dict[str, set[asyncio.Task[Any]]] = {}
         self._on_idle: Optional[IdleCallback] = None
         self._is_cancellation_requested: Optional[CancellationCheck] = None
 
@@ -177,8 +173,11 @@ class TaskWorkIndex:
         self._on_idle = on_idle
         self._is_cancellation_requested = is_cancellation_requested
 
-    def rebuild(self, snapshots: Mapping[str, Iterable[Any]]) -> None:
-        """Rebuild persistent work from QueueFS while preserving concurrent enqueues."""
+    def rebuild(
+        self,
+        snapshots: Mapping[str, Iterable[Any]],
+    ) -> Dict[str, tuple[str, str]]:
+        """Rebuild work from QueueFS and return owners needed to restore task records."""
         work: Dict[str, set[tuple[str, str]]] = {}
         owners: Dict[str, tuple[str, str]] = {}
         for queue_name, messages in snapshots.items():
@@ -192,17 +191,14 @@ class TaskWorkIndex:
         with self._lock:
             for task_id, entries in self._work.items():
                 work.setdefault(task_id, set()).update(entries)
-            owners = {**self._owners, **owners}
             self._work = work
-            self._owners = owners
+        return owners
 
     def register(self, queue_name: str, metadata: Optional[QueueTaskMetadata]) -> None:
         if metadata is None:
             return
         with self._lock:
             self._work.setdefault(metadata.task_id, set()).add((queue_name, metadata.work_id))
-            if metadata.owner is not None:
-                self._owners[metadata.task_id] = metadata.owner
 
     def settle(self, queue_name: str, message: Any) -> None:
         metadata = (
@@ -210,8 +206,7 @@ class TaskWorkIndex:
         )
         if metadata is None:
             return
-        callback: Optional[IdleCallback] = None
-        owner: Optional[tuple[str, str]] = None
+        became_idle = False
         with self._lock:
             entries = self._work.get(metadata.task_id)
             if entries is not None:
@@ -219,18 +214,13 @@ class TaskWorkIndex:
                 if not entries:
                     self._work.pop(metadata.task_id, None)
             if not self._work.get(metadata.task_id) and not self._active.get(metadata.task_id):
-                owner = self._owners.pop(metadata.task_id, metadata.owner)
-                callback = self._on_idle
-        if callback is not None:
-            callback(metadata.task_id, owner)
+                became_idle = True
+        if became_idle and self.cancellation_requested(metadata.task_id) and self._on_idle:
+            self._on_idle(metadata.task_id)
 
     def has_work(self, task_id: str) -> bool:
         with self._lock:
             return bool(self._work.get(task_id) or self._active.get(task_id))
-
-    def owners(self) -> Dict[str, tuple[str, str]]:
-        with self._lock:
-            return dict(self._owners)
 
     def cancellation_requested(self, task_id: str) -> bool:
         callback = self._is_cancellation_requested
@@ -240,33 +230,27 @@ class TaskWorkIndex:
         self,
         task_id: str,
         active_task: asyncio.Task[Any],
-        owner: Optional[tuple[str, str]] = None,
     ) -> None:
-        loop = asyncio.get_running_loop()
         with self._lock:
-            self._active.setdefault(task_id, {})[id(active_task)] = (loop, active_task)
-            if owner is not None and all(owner):
-                self._owners[task_id] = owner
+            self._active.setdefault(task_id, set()).add(active_task)
         if self.cancellation_requested(task_id):
-            loop.call_soon(active_task.cancel)
+            active_task.get_loop().call_soon(active_task.cancel)
 
     def unregister_active(self, task_id: str, active_task: asyncio.Task[Any]) -> None:
-        callback: Optional[IdleCallback] = None
-        owner: Optional[tuple[str, str]] = None
+        became_idle = False
         with self._lock:
             entries = self._active.get(task_id)
             if entries is not None:
-                entries.pop(id(active_task), None)
+                entries.discard(active_task)
                 if not entries:
                     self._active.pop(task_id, None)
             if not self._work.get(task_id) and not self._active.get(task_id):
-                owner = self._owners.pop(task_id, None)
-                callback = self._on_idle
-        if callback is not None:
-            callback(task_id, owner)
+                became_idle = True
+        if became_idle and self.cancellation_requested(task_id) and self._on_idle:
+            self._on_idle(task_id)
 
     def cancel_active(self, task_id: str) -> None:
         with self._lock:
-            active = list(self._active.get(task_id, {}).values())
-        for loop, task in active:
-            loop.call_soon_threadsafe(task.cancel)
+            active = list(self._active.get(task_id, ()))
+        for task in active:
+            task.get_loop().call_soon_threadsafe(task.cancel)
