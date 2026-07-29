@@ -186,7 +186,10 @@ On `startup` or `clear`, the script:
    - **≥2 active** → skip; rely on idle TTL (we can't tell which one ended)
 2. **Idle-TTL sweep at the tail**: any state file (regardless of session_id) older than `OPENVIKING_CODEX_IDLE_TTL_MS` (default 30 min) gets committed and cleared.
 
-On any /commit failure (OV unreachable, non-2xx, timeout) we **preserve state** (don't `clearState`) so the next sweep can retry.
+When `/commit` returns 404 or 410, the server session is permanently unavailable,
+so we clear the stale local state and do not retry it on later session starts.
+For transient failures (OV unreachable, timeout, or other non-2xx responses), we
+**preserve state** (don't `clearState`) so the next sweep can retry.
 
 On `resume`, the script skips commit/sweep. If local state has no live `ovSessionId`, it reads `/api/v1/sessions/{cx-session-id}/context` and injects the latest committed archive overview. The injected block includes a `viking://user/sessions/{cx-session-id}/history/` URI and tells the model to use the OpenViking MCP `read`/`search` tools for exact prior commands, file paths, tool outputs, or messages. Set `OPENVIKING_RESUME_ARCHIVE_INJECT=0` to disable this.
 

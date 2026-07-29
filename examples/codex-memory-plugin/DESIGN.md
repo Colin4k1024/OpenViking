@@ -191,10 +191,16 @@ next slice captures everything in the new transcript.
 
 ### Commit failure
 
-When OV `/commit` returns non-2xx or times out, we currently log and treat
-the result as null. We must NOT call `clearState` on failure — keep the
-state file so the next sweep / SessionStart can retry. A transient OV
+When OV `/commit` returns 404 or 410, the target session is permanently
+unavailable, so we clear the stale state instead of retrying it on every later
+session start. For other non-2xx responses or timeouts, we log and treat
+the result as null. We must NOT call `clearState` on those retryable failures —
+keep the state file so the next sweep / SessionStart can retry. A transient OV
 outage shouldn't lose a session's worth of memory.
+
+Idle sweep commits each state with the `workspacePeerId` stored in that state,
+not the peer derived from whichever workspace happens to start the sweep.
+Legacy states without this field are committed without a peer header.
 
 ### Race: SIGTERM before Stop completes
 

@@ -24,9 +24,10 @@
  *   crashes that left state files orphaned.
  *
  * Commit failure handling:
- *   On any /commit failure (OV unreachable, non-2xx, timeout) we DO NOT call
- *   clearState — we keep the state file with ovSessionId still set so the
- *   next sweep retries. A transient OV outage shouldn't lose memory.
+ *   On terminal 404/410 responses, clear the stale local state because the
+ *   server session can no longer be committed. For transient failures (OV
+ *   unreachable, timeout, other non-2xx), keep the state file with ovSessionId
+ *   still set so the next sweep retries.
  *
  * Output schema accepts {} as a no-op, or hookSpecificOutput.additionalContext
  * for resume archive context injection.
@@ -78,7 +79,7 @@ function emitAdditionalContext(additionalContext) {
   });
 }
 
-async function fetchJSON(path, init = {}) {
+async function fetchJSONResult(path, init = {}, peerId = activePeerId) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.captureTimeoutMs);
   try {
@@ -89,25 +90,32 @@ async function fetchJSON(path, init = {}) {
     }
     if (cfg.sendIdentityHeaders && cfg.account) headers["X-OpenViking-Account"] = cfg.account;
     if (cfg.sendIdentityHeaders && cfg.user) headers["X-OpenViking-User"] = cfg.user;
-    if (activePeerId) headers["X-OpenViking-Actor-Peer"] = activePeerId;
+    if (peerId) headers["X-OpenViking-Actor-Peer"] = peerId;
     if (cfg.userAgent) headers["User-Agent"] = cfg.userAgent;
     const res = await fetch(`${cfg.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
     const body = await res.json().catch(() => null);
-    if (!body) return null;
-    if (!res.ok || body.status === "error") return null;
-    return body.result ?? body;
+    if (!body || !res.ok || body.status === "error") {
+      return { ok: false, status: res.status, value: null };
+    }
+    return { ok: true, status: res.status, value: body.result ?? body };
   } catch {
-    return null;
+    return { ok: false, status: null, value: null };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function commitOvSession(ovSessionId) {
-  if (!ovSessionId) return null;
-  return fetchJSON(
+async function fetchJSON(path, init = {}) {
+  const result = await fetchJSONResult(path, init);
+  return result.value;
+}
+
+async function commitOvSession(ovSessionId, peerId) {
+  if (!ovSessionId) return { ok: false, status: null, value: null };
+  return fetchJSONResult(
     `/api/v1/sessions/${encodeURIComponent(ovSessionId)}/commit`,
     { method: "POST", body: JSON.stringify({}) },
+    peerId,
   );
 }
 
@@ -181,20 +189,34 @@ async function injectResumeArchive(newSessionId) {
 }
 
 /**
- * Commit and clear a single state file. On commit failure, preserve state
- * (don't call clearState) so the next sweep retries.
+ * Commit and clear a single state file. Terminal missing-session responses
+ * clear stale state; retryable failures preserve it for the next sweep.
  *
  * Returns { committed: bool, ovSessionId: string|null }.
  */
 async function commitAndClear(state, reason) {
   if (state.ovSessionId) {
     const ovSessionId = state.ovSessionId;
-    const commit = await commitOvSession(state.ovSessionId);
-    if (!commit) {
+    const statePeerId = Object.hasOwn(state, "workspacePeerId")
+      ? state.workspacePeerId || cfg.peerId || ""
+      : "";
+    const commit = await commitOvSession(state.ovSessionId, statePeerId);
+    if (!commit.ok) {
+      if (commit.status === 404 || commit.status === 410) {
+        log("commit_terminal_clear_state", {
+          reason,
+          codexSessionId: state.codexSessionId,
+          ovSessionId: state.ovSessionId,
+          status: commit.status,
+        });
+        await clearState(state.codexSessionId);
+        return { committed: true, ovSessionId: null };
+      }
       logError("commit_failed_keep_state", {
         reason,
         codexSessionId: state.codexSessionId,
         ovSessionId: state.ovSessionId,
+        status: commit.status,
       });
       return { committed: false, ovSessionId: null };
     }
@@ -202,9 +224,9 @@ async function commitAndClear(state, reason) {
       reason,
       codexSessionId: state.codexSessionId,
       ovSessionId,
-      archived: commit.archived ?? false,
-      taskId: commit.task_id,
-      status: commit.status,
+      archived: commit.value.archived ?? false,
+      taskId: commit.value.task_id,
+      status: commit.value.status,
     });
     await clearState(state.codexSessionId);
     return { committed: true, ovSessionId };
