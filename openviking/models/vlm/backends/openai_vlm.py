@@ -18,7 +18,7 @@ try:
 except ImportError:
     openai = None
 
-from openviking.utils.model_retry import retry_async, retry_sync
+from openviking.utils.model_retry import retry_model_call_async, retry_model_call_sync
 
 from ..base import ToolCall, VLMBase, VLMResponse
 from ..registry import DEFAULT_AZURE_API_VERSION
@@ -310,7 +310,7 @@ class OpenAIVLM(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._extract_completion_content(response, elapsed)
 
-        return retry_sync(
+        return retry_model_call_sync(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -343,7 +343,7 @@ class OpenAIVLM(VLMBase):
         # 用 tracer.info 打印请求
         tracer.info(f"messages={json.dumps(kwargs, ensure_ascii=False, indent=2)}")
 
-        return await retry_async(
+        return await retry_model_call_async(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -426,7 +426,7 @@ class OpenAIVLM(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._extract_completion_content(response, elapsed)
 
-        return retry_sync(
+        return retry_model_call_sync(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -458,7 +458,7 @@ class OpenAIVLM(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return await self._extract_completion_content_async(response, elapsed)
 
-        return await retry_async(
+        return await retry_model_call_async(
             _call,
             max_retries=self.max_retries,
             logger=logger,

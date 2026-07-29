@@ -16,7 +16,7 @@ import litellm
 from litellm import acompletion, completion
 
 from openviking.telemetry import tracer
-from openviking.utils.model_retry import retry_async, retry_sync
+from openviking.utils.model_retry import retry_model_call_async, retry_model_call_sync
 from openviking_cli.utils import get_logger
 
 from ..base import ToolCall, VLMBase, VLMResponse
@@ -270,6 +270,7 @@ class LiteLLMVLMProvider(VLMBase):
             "messages": messages,
             "temperature": self.temperature,
             "timeout": self.timeout,
+            "num_retries": 0,
         }
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
@@ -405,7 +406,7 @@ class LiteLLMVLMProvider(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._clean_response(self._extract_content_from_response(response))
 
-        return retry_sync(
+        return retry_model_call_sync(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -436,7 +437,7 @@ class LiteLLMVLMProvider(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._clean_response(self._extract_content_from_response(response))
 
-        return await retry_async(
+        return await retry_model_call_async(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -464,7 +465,7 @@ class LiteLLMVLMProvider(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._clean_response(self._extract_content_from_response(response))
 
-        return retry_sync(
+        return retry_model_call_sync(
             _call,
             max_retries=self.max_retries,
             logger=logger,
@@ -492,7 +493,7 @@ class LiteLLMVLMProvider(VLMBase):
                 return self._build_vlm_response(response, has_tools=True)
             return self._clean_response(self._extract_content_from_response(response))
 
-        return await retry_async(
+        return await retry_model_call_async(
             _call,
             max_retries=self.max_retries,
             logger=logger,

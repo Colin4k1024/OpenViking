@@ -69,6 +69,26 @@ def test_volcengine_dense_embedder_reports_embedding_telemetry_usage(monkeypatch
     assert summary["tokens"]["total"] == 16
 
 
+def test_volcengine_dense_embedder_disables_sdk_retries(monkeypatch):
+    client_kwargs = {}
+    fake_client = SimpleNamespace()
+
+    def _build_client(**kwargs):
+        client_kwargs.update(kwargs)
+        return fake_client
+
+    monkeypatch.setattr("volcenginesdkarkruntime.Ark", _build_client)
+
+    VolcengineDenseEmbedder(
+        model_name="doubao-embedding-vision-251215",
+        api_key="test",
+        input_type="multimodal",
+        dimension=3,
+    )
+
+    assert client_kwargs["max_retries"] == 0
+
+
 def test_volcengine_dense_embedder_reports_embedding_telemetry_usage_from_dict_usage(
     monkeypatch,
 ):

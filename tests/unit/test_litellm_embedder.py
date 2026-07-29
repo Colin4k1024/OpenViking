@@ -22,6 +22,17 @@ def _mock_litellm_response(vectors=None, usage=None):
 class TestLiteLLMDenseEmbedder:
     """Test cases for LiteLLMDenseEmbedder."""
 
+    def test_build_kwargs_disables_litellm_retries(self):
+        from openviking.models.embedder.litellm_embedders import LiteLLMDenseEmbedder
+
+        embedder = LiteLLMDenseEmbedder(
+            model_name="openai/text-embedding-3-small",
+            api_key="test-key",
+            dimension=1536,
+        )
+
+        assert embedder._build_kwargs()["num_retries"] == 0
+
     @patch("openviking.models.embedder.litellm_embedders.litellm")
     def test_embed_basic(self, mock_litellm):
         """Basic embedding should return a dense vector."""

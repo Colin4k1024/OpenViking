@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -29,14 +30,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=200,
-        help="Concurrent rollout executions for train and eval (default: 200)",
+        default=150,
+        help="Concurrent rollout executions for train and eval (default: 150)",
     )
     parser.add_argument(
         "--commit-concurrency",
         type=int,
-        default=200,
-        help="Concurrent OpenViking session.commit submissions during train (default: 200)",
+        default=150,
+        help="Concurrent OpenViking session.commit submissions during train (default: 150)",
     )
     parser.add_argument(
         "--commit-case-spec",
@@ -159,8 +160,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--eval-each-epoch",
-        action="store_true",
-        help="Run held-out eval after every training epoch. Disabled by default.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run held-out eval after every training epoch. Disabled by default; "
+            "use --no-eval-each-epoch to override a launcher default."
+        ),
     )
     parser.add_argument(
         "--skip-final-eval",
@@ -297,6 +302,8 @@ async def main_async() -> int:
             continue_on_rollout_failure=args.continue_on_rollout_failure,
             clean_result=args.clean_result,
             keep_recent_results=args.keep_recent_results,
+            git_notes_commit=os.environ.get("OPENVIKING_TRAIN_GIT_NOTES_COMMIT"),
+            git_notes_launch_command=os.environ.get("OPENVIKING_TRAIN_LAUNCH_COMMAND"),
         )
     )
     return 1 if any(epoch.get("errors") for epoch in report.train_epochs) else 0

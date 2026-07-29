@@ -51,6 +51,22 @@ bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
   --skip-final-eval
 ```
 
+Experience recall defaults to `case_ann`. Use the launcher-only
+`--experience-recall-mode` argument to compare it with the Experience-only or
+hybrid paths:
+
+```bash
+bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
+  --experience-recall-mode hybrid_ann \
+  --epochs 0 \
+  --eval-index 14 \
+  --trials 8
+```
+
+Accepted values are `case_ann`, `exp_ann`, and `hybrid_ann`. The launcher passes
+the selected value directly to the Tau2 rollout service; no environment variable
+is read for this setting.
+
 Example: reuse the cached epoch-0/no-memory train rollout if it already exists;
 on cache miss, run the rollout normally and write the cache:
 
@@ -70,6 +86,17 @@ bash benchmark/tau2/train/restart_vikingbot_train_eval.sh \
 `--reuse-train-rollout-cache` is off by default and only affects training
 rollouts for epoch `0`, before memory training has changed the policy. Later
 training epochs and eval rollouts are always executed normally.
+
+Pass `--auto-commit` to commit pending changes before services start. The
+launcher then appends the redacted launch command and concise baseline,
+per-epoch train/eval, final, and run-result summaries to the local Git note for
+that commit. Notes stay local and do not change the commit SHA or push anything:
+
+```bash
+bash benchmark/tau2/train/restart_vikingbot_train_eval.sh --auto-commit \
+  --epochs 2 --train-index 14 --eval-index 14
+git notes show HEAD
+```
 
 ## 2. Evaluation modes from the restart launcher
 
@@ -222,6 +249,7 @@ Service options:
 | `--config` | `~/.openviking/ov.conf` | ov.conf for VikingBot / OpenViking access |
 | `--rollout-language` | `default` | Rollout response language. Use `zh` for Chinese user-facing replies. |
 | `--rollout-backend` | `vikingbot` | Rollout implementation backend. `native` for fast Python executor, `vikingbot` for full VikingBot AgentLoop. |
+| `--experience-recall-mode` | `case_ann` | Experience recall strategy: `case_ann`, `exp_ann`, or `hybrid_ann`. |
 | `--native-thread-workers` | `128` | Thread pool size for native rollout executor. |
 | `--rollout-thread-workers` | `200` | Worker threads used to host rollout executions off the uvicorn event loop. Use `0` to disable threaded hosting. |
 | `--max-rollout-concurrency` | `200` | Maximum concurrent rollout executions accepted by the service. |

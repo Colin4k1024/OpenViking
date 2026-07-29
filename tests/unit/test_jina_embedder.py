@@ -90,6 +90,7 @@ class TestJinaDenseEmbedder:
             model_name="jina-embeddings-v5-text-small",
             api_key="test-api-key",
         )
+        assert mock_openai_class.call_args.kwargs["max_retries"] == 0
         result = embedder.embed("Hello world")
 
         # Verify

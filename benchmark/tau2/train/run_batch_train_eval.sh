@@ -5,6 +5,8 @@ set -euo pipefail
 # Start the tau2 runtime service first:
 #   bash benchmark/tau2/train/run_service.sh --host 127.0.0.1 --port 1944
 # Pass --rollout-backend native|vikingbot to override per run (default: vikingbot).
+# Pass --no-eval-each-epoch to disable the Tau2 default per-epoch eval while
+# keeping the final eval enabled unless --skip-final-eval is also provided.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAU2_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -26,6 +28,6 @@ exec "${REPO_ROOT}/openviking/session/train/run_batch_train_eval.sh" \
   --dataset tau2 \
   --domain airline \
   --eval-each-epoch \
-  --concurrency 200 \
-  --commit-concurrency 200 \
+  --concurrency 150 \
+  --commit-concurrency 150 \
   "$@"

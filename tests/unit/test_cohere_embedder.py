@@ -17,6 +17,36 @@ from openviking.models.embedder.cohere_embedders import (
 class TestCohereDenseEmbedder:
     """Test cases for CohereDenseEmbedder."""
 
+    @patch("openviking.utils.model_retry.time.sleep")
+    @patch("openviking.models.embedder.cohere_embedders.httpx.Client")
+    def test_sync_embed_uses_unbounded_rate_limit_retry(
+        self,
+        mock_client_class,
+        _mock_sleep,
+    ):
+        response = MagicMock()
+        response.json.return_value = {"embeddings": {"float": [[0.1, 0.2, 0.3]]}}
+        response.raise_for_status = MagicMock()
+        post = MagicMock(
+            side_effect=[
+                RuntimeError("Error code: 429 - RequestBurstTooFast"),
+                RuntimeError("Error code: 429 - ServerOverloaded"),
+                response,
+            ]
+        )
+        mock_client_class.return_value.post = post
+        embedder = CohereDenseEmbedder(
+            model_name="embed-english-v3.0",
+            api_key="cohere-key",
+            dimension=3,
+            config={"max_retries": 1},
+        )
+
+        result = embedder.embed("hello")
+
+        assert result.dense_vector == [0.1, 0.2, 0.3]
+        assert post.call_count == 3
+
     def test_init_requires_api_key(self):
         with pytest.raises(ValueError, match="api_key is required"):
             CohereDenseEmbedder(model_name="embed-v4.0")

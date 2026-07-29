@@ -16,11 +16,13 @@ from benchmark.tau2.train.rollout_executor_native import NativeTau2RolloutExecut
 from benchmark.tau2.train.rollout_executor_vikingbot import (  # re-export vikingbot-only helpers for tests
     DEFAULT_SYSTEM_PROMPT_PROFILE,
     DEFAULT_TAU2_EXPERIENCE_LOADER_MODE,
+    DEFAULT_TAU2_EXPERIENCE_RECALL_MODE,
     _append_final_answer_for_tau2_evaluation,
     _build_rollout_messages,
     _configure_tools,
     normalize_system_prompt_profile,
     normalize_tau2_experience_loader_mode,
+    normalize_tau2_experience_recall_mode,
 )
 from benchmark.tau2.train.rollout_executor_vikingbot import (
     Tau2RolloutExecutor as VikingBotTau2RolloutExecutor,
@@ -55,9 +57,13 @@ def make_tau2_rollout_executor(
             concurrency=concurrency,
             keep_default_tools=_bool_option(opts.get("keep_default_tools"), default=True),
             max_iterations=int(opts.get("max_iterations") or 30),
+            seed=int(opts.get("seed") if opts.get("seed") is not None else 300),
             rollout_language=str(opts.get("rollout_language") or rollout_language),
             loader_mode=normalize_tau2_experience_loader_mode(
                 opts.get("loader_mode") or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
+            ),
+            experience_recall_mode=normalize_tau2_experience_recall_mode(
+                opts.get("experience_recall_mode") or DEFAULT_TAU2_EXPERIENCE_RECALL_MODE
             ),
             system_prompt_profile=normalize_system_prompt_profile(
                 opts.get("system_prompt_profile") or DEFAULT_SYSTEM_PROMPT_PROFILE
@@ -65,6 +71,8 @@ def make_tau2_rollout_executor(
             direct_experience_content=_optional_str(opts.get("direct_experience_content")),
             direct_experience_name=_optional_str(opts.get("direct_experience_name")),
             direct_experience_uri=_optional_str(opts.get("direct_experience_uri")),
+            first_user_cache=_bool_option(opts.get("first_user_cache"), default=True),
+            first_user_cache_dir=_optional_str(opts.get("first_user_cache_dir")),
         )
     loader_mode = normalize_tau2_experience_loader_mode(
         opts.get("loader_mode") or DEFAULT_TAU2_EXPERIENCE_LOADER_MODE
@@ -161,6 +169,7 @@ def _optional_str(value: Any) -> str | None:
 
 __all__ = [
     "DEFAULT_TAU2_EXPERIENCE_LOADER_MODE",
+    "DEFAULT_TAU2_EXPERIENCE_RECALL_MODE",
     "DEFAULT_TAU2_ROLLOUT_BACKEND",
     "NativeTau2RolloutExecutor",
     "Tau2RolloutBackend",
@@ -169,6 +178,7 @@ __all__ = [
     "make_tau2_rollout_executor",
     "normalize_system_prompt_profile",
     "normalize_tau2_experience_loader_mode",
+    "normalize_tau2_experience_recall_mode",
     "normalize_tau2_rollout_backend",
     "_append_final_answer_for_tau2_evaluation",
     "_as_tool_input",

@@ -93,12 +93,7 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
     def _create_session(self) -> requests.Session:
         """Create a requests session with retry logic"""
         session = requests.Session()
-        retry_strategy = Retry(
-            total=self.max_retries,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["POST"],
-        )
+        retry_strategy = Retry(total=0)
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
@@ -200,7 +195,11 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
 
     def embed(self, text: str, is_query: bool = False) -> EmbedResult:
         """Perform dense embedding on text"""
-        vectors = self._call_api([text], is_query=is_query)
+        vectors = self._run_with_retry(
+            lambda: self._call_api([text], is_query=is_query),
+            logger=logger,
+            operation_name="MiniMax embedding",
+        )
         result = EmbedResult(dense_vector=vectors[0])
         # Estimate token usage
         estimated_tokens = self._estimate_tokens(text)
@@ -238,7 +237,11 @@ class MinimaxDenseEmbedder(DenseEmbedderBase):
 
         # MiniMax might have batch size limits, but let's assume the caller handles batching or use safe defaults
         # For now, we pass through. If needed, we can implement internal chunking.
-        vectors = self._call_api(texts, is_query=is_query)
+        vectors = self._run_with_retry(
+            lambda: self._call_api(texts, is_query=is_query),
+            logger=logger,
+            operation_name="MiniMax batch embedding",
+        )
         results = [EmbedResult(dense_vector=v) for v in vectors]
         # Estimate token usage for batch
         total_tokens = sum(self._estimate_tokens(text) for text in texts)

@@ -79,6 +79,7 @@ class TestDashScopeInit:
         assert embedder.api_key == "sk-test"
         assert embedder.api_base == "https://dashscope.aliyuncs.com"
         assert embedder.provider == "dashscope"
+        assert mock_openai.call_args.kwargs["max_retries"] == 0
 
     @patch("openviking.models.embedder.dashscope_embedders.openai.OpenAI")
     @patch("openviking.models.embedder.dashscope_embedders.httpx.Client")

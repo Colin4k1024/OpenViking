@@ -120,7 +120,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
             raise ValueError("api_key is required")
 
         # Initialize Volcengine client
-        ark_kwargs = {"api_key": self.api_key}
+        ark_kwargs = {"api_key": self.api_key, "max_retries": 0}
         if self.api_base:
             ark_kwargs["base_url"] = self.api_base
         self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
@@ -334,7 +334,7 @@ class VolcengineSparseEmbedder(SparseEmbedderBase):
         if not self.api_key:
             raise ValueError("api_key is required")
 
-        ark_kwargs = {"api_key": self.api_key}
+        ark_kwargs = {"api_key": self.api_key, "max_retries": 0}
         if self.api_base:
             ark_kwargs["base_url"] = self.api_base
         self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
@@ -516,7 +516,7 @@ class VolcengineHybridEmbedder(HybridEmbedderBase):
         if not self.api_key:
             raise ValueError("api_key is required")
 
-        ark_kwargs = {"api_key": self.api_key}
+        ark_kwargs = {"api_key": self.api_key, "max_retries": 0}
         if self.api_base:
             ark_kwargs["base_url"] = self.api_base
         self.client = volcenginesdkarkruntime.Ark(**ark_kwargs)
