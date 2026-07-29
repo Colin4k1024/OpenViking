@@ -4349,12 +4349,7 @@ class VikingFS:
         )
         active_task = asyncio.current_task()
         if active_task is not None:
-            await tracker.register_running_task(
-                task_id,
-                active_task,
-                account_id=ctx.account_id,
-                user_id=ctx.user.user_id,
-            )
+            tracker.register_running_task(task_id, active_task)
         try:
             from openviking.service.reindex_executor import get_reindex_executor
 

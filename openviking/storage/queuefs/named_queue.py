@@ -350,11 +350,7 @@ class NamedQueue:
             if self._task_work_index.cancellation_requested(metadata.task_id):
                 return await self._dequeue_handler.on_cancelled(data)
             if active_task is not None:
-                self._task_work_index.register_active(
-                    metadata.task_id,
-                    active_task,
-                    metadata.owner,
-                )
+                self._task_work_index.register_active(metadata.task_id, active_task)
             try:
                 return await self._dequeue_handler.on_dequeue(data)
             except asyncio.CancelledError:

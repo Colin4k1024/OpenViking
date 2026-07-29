@@ -26,10 +26,10 @@ def test_task_context_is_persisted_and_rebuilt_from_queue_messages():
 
     envelope = {"id": "queue-id", "data": json.dumps(payload)}
     rebuilt = TaskWorkIndex()
-    rebuilt.rebuild({"Semantic": [envelope]})
+    owners = rebuilt.rebuild({"Semantic": [envelope]})
 
     assert rebuilt.has_work("task-1")
-    assert rebuilt.owners() == {"task-1": ("acme", "alice")}
+    assert owners == {"task-1": ("acme", "alice")}
     rebuilt.settle("Semantic", envelope)
     assert not rebuilt.has_work("task-1")
 
@@ -57,7 +57,7 @@ def test_rebuild_preserves_work_registered_during_startup():
     )
     index.register("Semantic", metadata)
 
-    index.rebuild({"Semantic": []})
+    owners = index.rebuild({"Semantic": []})
 
     assert index.has_work("task-1")
-    assert index.owners() == {"task-1": ("acme", "alice")}
+    assert owners == {}
