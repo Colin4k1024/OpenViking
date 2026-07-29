@@ -247,10 +247,20 @@ async def test_user_deletion_fence_revokes_key_and_prevents_stale_finish(
     assert manager.is_user_deleting(acct, "bob")
     with pytest.raises(UnauthenticatedError):
         manager.resolve(bob_key)
+    with pytest.raises(AlreadyExistsError):
+        await manager.register_user(acct, "bob", "user")
     assert await manager.finish_user_deletion(acct, "bob", "stale") is False
     assert manager.has_user(acct, "bob")
     assert await manager.finish_user_deletion(acct, "bob", "delete-1") is True
     assert not manager.has_user(acct, "bob")
+    with pytest.raises(NotFoundError):
+        await manager.begin_user_deletion(
+            acct,
+            "bob",
+            task_id="delete-2",
+            owner_account_id=acct,
+            owner_user_id="alice",
+        )
 
     new_key = await manager.register_user(acct, "bob", "user")
     assert await manager.finish_user_deletion(acct, "bob", "delete-1") is False

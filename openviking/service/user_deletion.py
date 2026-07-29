@@ -13,6 +13,11 @@ from typing import Any, Optional
 from openviking.core.namespace import canonical_user_root
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
+from openviking.service.task_work_index import (
+    TASK_ACCOUNT_ID_FIELD,
+    TASK_USER_ID_FIELD,
+    extract_task_metadata,
+)
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.viking_fs import LS_ALL_NODES
 from openviking_cli.exceptions import NotFoundError
@@ -23,6 +28,11 @@ logger = get_logger(__name__)
 
 TASK_TYPE = "user_delete"
 _CANCEL_WAIT_SECONDS = 30.0
+_ACTIVE_TASK_STATUSES = (
+    TaskStatus.PENDING,
+    TaskStatus.RUNNING,
+    TaskStatus.CANCELLING,
+)
 
 
 def deletion_message(
@@ -35,6 +45,8 @@ def deletion_message(
 ) -> dict[str, str]:
     return {
         "task_id": task_id,
+        TASK_ACCOUNT_ID_FIELD: owner_account_id,
+        TASK_USER_ID_FIELD: owner_user_id,
         "owner_account_id": owner_account_id,
         "owner_user_id": owner_user_id,
         "account_id": account_id,
@@ -62,7 +74,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
             for task in await tracker.list_tasks(
                 account_id=account_id, user_id=user_id, limit=10_000
             )
-            if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+            if task.status in _ACTIVE_TASK_STATUSES
         ]
         blockers = []
         for task in active:
@@ -82,7 +94,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
                     user_id=user_id,
                     limit=10_000,
                 )
-                if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+                if task.status in _ACTIVE_TASK_STATUSES
             ]
             if not remaining:
                 return
@@ -142,11 +154,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
         )
         deletion = self._manager.get_user_deletion(target_account_id, target_user_id)
         if not deletion or deletion.get("task_id") != task_id:
-            await tracker.complete(
-                task_id,
-                {"deleted": not self._manager.has_user(target_account_id, target_user_id)},
-                **owner,
-            )
+            await tracker.complete(task_id, **owner)
             self.report_success()
             return
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
@@ -155,20 +163,24 @@ class UserDeletionProcessor(DequeueHandlerBase):
 
         removed = False
         try:
-            await tracker.start(task_id, stage="cancelling_tasks", **owner)
+            await tracker.start(task_id, stage="stopping_watches", **owner)
+            await self._delete_watches(target_account_id, target_user_id)
+            await tracker.update_stage(task_id, "cancelling_tasks", **owner)
             await self._cancel_user_tasks(target_account_id, target_user_id)
             await tracker.update_stage(task_id, "cleaning", **owner)
-            await self._delete_watches(target_account_id, target_user_id)
 
             cleanup_ctx = RequestContext(
                 user=UserIdentifier(target_account_id, target_user_id),
                 role=Role.ROOT,
             )
-            await self._service.viking_fs.rm(
-                canonical_user_root(cleanup_ctx),
-                recursive=True,
-                ctx=cleanup_ctx,
-            )
+            try:
+                await self._service.viking_fs.rm(
+                    canonical_user_root(cleanup_ctx),
+                    recursive=True,
+                    ctx=cleanup_ctx,
+                )
+            except NotFoundError:
+                pass
             await self._delete_uploads(cleanup_ctx)
             removed = await self._manager.finish_user_deletion(
                 target_account_id,
@@ -178,7 +190,7 @@ class UserDeletionProcessor(DequeueHandlerBase):
             if not removed:
                 self.report_success()
                 return
-            await tracker.complete(task_id, {"deleted": True}, **owner)
+            await tracker.complete(task_id, **owner)
             self.report_success()
         except Exception as exc:
             if removed:
@@ -244,6 +256,11 @@ async def setup_user_deletion(
         allow_create=True,
     )
     tracker = get_task_tracker()
+    queued_task_ids = {
+        metadata.task_id
+        for message in await queue.snapshot()
+        if (metadata := extract_task_metadata(message)) is not None
+    }
     for account_id, user_id, deletion in manager.iter_user_deletions():
         task_id = deletion.get("task_id")
         owner_account_id = deletion.get("owner_account_id")
@@ -263,7 +280,7 @@ async def setup_user_deletion(
                 account_id=owner_account_id,
                 user_id=owner_user_id,
             )
-        if task.status == TaskStatus.PENDING:
+        if task.status == TaskStatus.PENDING and task_id not in queued_task_ids:
             await queue.enqueue(
                 deletion_message(
                     task_id=task_id,
@@ -273,3 +290,4 @@ async def setup_user_deletion(
                     user_id=user_id,
                 )
             )
+            queued_task_ids.add(task_id)

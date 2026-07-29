@@ -401,6 +401,7 @@ async def remove_user(
         owner_user_id=owner_user_id,
     )
     tracker = get_task_tracker()
+    should_enqueue = created
     if not created:
         task_id = deletion["task_id"]
         owner_account_id = deletion["owner_account_id"]
@@ -410,11 +411,9 @@ async def remove_user(
             account_id=owner_account_id,
             user_id=owner_user_id,
         )
-        if existing is not None and existing.status in (
-            TaskStatus.FAILED,
-            TaskStatus.COMPLETED,
-            TaskStatus.CANCELLED,
-        ):
+        if existing is None:
+            should_enqueue = True
+        elif existing.status == TaskStatus.FAILED:
             replacement_id = str(uuid4())
             deletion = await manager.replace_user_deletion_task(
                 account_id,
@@ -427,6 +426,7 @@ async def remove_user(
             task_id = deletion["task_id"]
             owner_account_id = deletion["owner_account_id"]
             owner_user_id = deletion["owner_user_id"]
+            should_enqueue = True
     await tracker.create(
         USER_DELETE_TASK_TYPE,
         resource_id=f"{account_id}/{user_id}",
@@ -434,17 +434,18 @@ async def remove_user(
         account_id=owner_account_id,
         user_id=owner_user_id,
     )
-    queue_manager = get_queue_manager()
-    await queue_manager.enqueue(
-        queue_manager.USER_DELETION,
-        deletion_message(
-            task_id=task_id,
-            owner_account_id=owner_account_id,
-            owner_user_id=owner_user_id,
-            account_id=account_id,
-            user_id=user_id,
-        ),
-    )
+    if should_enqueue:
+        queue_manager = get_queue_manager()
+        await queue_manager.enqueue(
+            queue_manager.USER_DELETION,
+            deletion_message(
+                task_id=task_id,
+                owner_account_id=owner_account_id,
+                owner_user_id=owner_user_id,
+                account_id=account_id,
+                user_id=user_id,
+            ),
+        )
     return Response(
         status="ok",
         result={

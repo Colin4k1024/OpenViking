@@ -671,6 +671,12 @@ async def test_remove_user(admin_client: httpx.AsyncClient, admin_service: OpenV
     assert task["status"] == "completed"
     assert not await admin_service.viking_fs.exists(private_uri, ctx=bob_ctx)
 
+    missing = await admin_client.delete(
+        f"/api/v1/admin/accounts/{acct}/users/bob",
+        headers=root_headers(),
+    )
+    assert missing.status_code == 404
+
     # Bob's key should be invalid now
     resp = await admin_client.get(
         "/api/v1/fs/ls?uri=viking://",

@@ -78,6 +78,7 @@ def create_worker_app() -> FastAPI:
         config.bot_api_url = bot_api_url
     return create_app(config)
 
+
 async def _initialize_auth_plugin(
     app: FastAPI,
     service: OpenVikingService,
