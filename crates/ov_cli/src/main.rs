@@ -1110,7 +1110,7 @@ enum TaskCommands {
         /// Filter by task type (e.g. add_resource, add_skill, session_commit, reindex)
         #[arg(long, value_name = "type")]
         task_type: Option<String>,
-        /// Filter by status (pending, running, completed, failed, cancelled)
+        /// Filter by status (pending, running, cancelling, completed, failed, cancelled)
         #[arg(long, value_name = "status")]
         status: Option<String>,
     },

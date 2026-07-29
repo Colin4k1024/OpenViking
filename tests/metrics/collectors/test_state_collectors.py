@@ -58,9 +58,10 @@ def test_task_tracker_collector_maps_counts(monkeypatch):
                 "session_commit": {
                     "pending": 1,
                     "running": 2,
-                    "completed": 3,
-                    "failed": 4,
-                    "cancelled": 5,
+                    "cancelling": 3,
+                    "completed": 4,
+                    "failed": 5,
+                    "cancelled": 6,
                 },
             }
 
@@ -72,9 +73,10 @@ def test_task_tracker_collector_maps_counts(monkeypatch):
     text = PrometheusExporter(registry=registry).render()
     assert 'openviking_task_pending{task_type="session_commit"} 1.0' in text
     assert 'openviking_task_running{task_type="session_commit"} 2.0' in text
-    assert 'openviking_task_completed{task_type="session_commit"} 3.0' in text
-    assert 'openviking_task_failed{task_type="session_commit"} 4.0' in text
-    assert 'openviking_task_cancelled{task_type="session_commit"} 5.0' in text
+    assert 'openviking_task_cancelling{task_type="session_commit"} 3.0' in text
+    assert 'openviking_task_completed{task_type="session_commit"} 4.0' in text
+    assert 'openviking_task_failed{task_type="session_commit"} 5.0' in text
+    assert 'openviking_task_cancelled{task_type="session_commit"} 6.0' in text
 
 
 def test_task_tracker_collector_clears_disappeared_task_types():

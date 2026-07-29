@@ -28,6 +28,7 @@ class TaskTrackerCollector(StateMetricCollector):
     # rule: <METRICS_NAMESPACE>_<DOMAIN>_running
     # e.g.: openviking_task_running
     RUNNING: ClassVar[str] = MetricCollector.metric_name(DOMAIN, "running")
+    CANCELLING: ClassVar[str] = MetricCollector.metric_name(DOMAIN, "cancelling")
     # rule: <METRICS_NAMESPACE>_<DOMAIN>_completed
     # e.g.: openviking_task_completed
     COMPLETED: ClassVar[str] = MetricCollector.metric_name(DOMAIN, "completed")
@@ -48,7 +49,14 @@ class TaskTrackerCollector(StateMetricCollector):
         counts_by_type = metric_input
         # Snapshot semantics: types can disappear entirely, so clear previous series to avoid
         # exporting stale non-zero gauges forever.
-        for metric_name in (self.PENDING, self.RUNNING, self.COMPLETED, self.FAILED, self.CANCELLED):
+        for metric_name in (
+            self.PENDING,
+            self.RUNNING,
+            self.CANCELLING,
+            self.COMPLETED,
+            self.FAILED,
+            self.CANCELLED,
+        ):
             registry.gauge_delete_matching(metric_name, match_labels={})
         for task_type, counts in counts_by_type.items():
             labels = {"task_type": str(task_type)}
@@ -61,6 +69,12 @@ class TaskTrackerCollector(StateMetricCollector):
             registry.set_gauge(
                 self.RUNNING,
                 float(counts.get("running", 0)),
+                labels=labels,
+                label_names=("task_type",),
+            )
+            registry.set_gauge(
+                self.CANCELLING,
+                float(counts.get("cancelling", 0)),
                 labels=labels,
                 label_names=("task_type",),
             )

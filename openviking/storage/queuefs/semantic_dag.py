@@ -9,6 +9,7 @@ from typing import ClassVar, Dict, List, Optional, Set
 from weakref import WeakKeyDictionary
 
 from openviking.server.identity import RequestContext
+from openviking.service.task_work_index import bind_task_context, get_task_context
 from openviking.storage.queuefs.semantic_sidecar import write_semantic_sidecars
 from openviking.storage.transaction import NO_LOCK, LockLease
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
@@ -123,6 +124,7 @@ class SemanticNodeScheduler:
                     return
                 continue
 
+            item.executor._start_scheduled_work()
             try:
                 if not item.executor.closed:
                     await item.executor._run_work(item.work)
@@ -131,6 +133,7 @@ class SemanticNodeScheduler:
             except Exception as exc:
                 item.executor.fail(exc)
             finally:
+                item.executor._finish_scheduled_work()
                 self._queue.task_done()
 
 
@@ -188,6 +191,7 @@ class SemanticDagExecutor:
         self._skip_vectorization = skip_vectorization
         self._coalesce_key = coalesce_key
         self._coalesce_version = coalesce_version
+        self._task_context = get_task_context()
         self._stale = False
         self._changed_paths = {
             path for key in ("added", "modified", "deleted") for path in self._changes.get(key, [])
@@ -200,6 +204,9 @@ class SemanticDagExecutor:
         self._root_uri: Optional[str] = None
         self._root_done: Optional[asyncio.Event] = None
         self._scheduler: Optional[SemanticNodeScheduler] = None
+        self._active_scheduled_work = 0
+        self._active_work_idle = asyncio.Event()
+        self._active_work_idle.set()
         self._closed = False
         self._failure: Optional[Exception] = None
         self._stats = DagStats()
@@ -260,6 +267,7 @@ class SemanticDagExecutor:
                     logger.error(f"Error in on_complete callback: {e}", exc_info=True)
         except BaseException:
             self._closed = True
+            await self._active_work_idle.wait()
             try:
                 await self._lock.close()
             except Exception:
@@ -267,6 +275,7 @@ class SemanticDagExecutor:
             raise
         finally:
             self._closed = True
+            await self._active_work_idle.wait()
             self._unregister_active()
 
     def _schedule_work(self, work: DagWork) -> None:
@@ -275,6 +284,15 @@ class SemanticDagExecutor:
         if self._scheduler is None:
             self._scheduler = get_semantic_node_scheduler(self._node_concurrency)
         self._scheduler.submit(self, work)
+
+    def _start_scheduled_work(self) -> None:
+        self._active_scheduled_work += 1
+        self._active_work_idle.clear()
+
+    def _finish_scheduled_work(self) -> None:
+        self._active_scheduled_work = max(0, self._active_scheduled_work - 1)
+        if self._active_scheduled_work == 0:
+            self._active_work_idle.set()
 
     def _schedule_dir(self, dir_uri: str, parent_uri: Optional[str]) -> None:
         if self._closed:
@@ -341,6 +359,17 @@ class SemanticDagExecutor:
         return stats
 
     async def _run_work(self, work: DagWork) -> None:
+        if self._task_context is not None:
+            with bind_task_context(
+                self._task_context.task_id,
+                self._task_context.account_id,
+                self._task_context.user_id,
+            ):
+                await self._run_work_bound(work)
+            return
+        await self._run_work_bound(work)
+
+    async def _run_work_bound(self, work: DagWork) -> None:
         if work.kind == "vectorize":
             await self._run_vectorize_work(work.vectorize_task)
             return
@@ -678,6 +707,8 @@ class SemanticDagExecutor:
             self._stats.done_nodes += 1
             self._stats.in_progress_nodes = max(0, self._stats.in_progress_nodes - 1)
 
+        if self._closed:
+            return
         try:
             if need_vectorize:
                 use_summary = self._is_code_repo and bool(summary_dict.get("summary"))
@@ -813,6 +844,9 @@ class SemanticDagExecutor:
                         dir_uri, file_summaries, children_abstracts
                     )
                 overview, abstract = self._processor._normalize_overview_generation(overview)
+
+            if self._closed:
+                return
 
             # Write directly, protected by the outer semantic lock.
             try:

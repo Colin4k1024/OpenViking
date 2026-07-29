@@ -13,6 +13,7 @@ from openviking.observability.context import (
 )
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
+from openviking.service.task_work_index import bind_task_context
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 from openviking.telemetry.span_models import create_root_span_attributes
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 
 
 class SessionCommitProcessor(DequeueHandlerBase):
+    manages_active_task = True
+
     def __init__(
         self,
         session_service: "SessionService",
@@ -56,6 +59,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
                 task_id=msg.task_id,
             )
             if task.status in (
+                TaskStatus.CANCELLING,
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
@@ -69,36 +73,33 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
                 )
-            session = self._session_service.session(
-                ctx,
-                msg.session_id,
-                session_uri=msg.session_uri,
-            )
             try:
-                if not await session.exists():
-                    await tracker.fail(
-                        msg.task_id,
-                        f"Session '{msg.session_id}' no longer exists",
-                        account_id=ctx.account_id,
-                        user_id=ctx.user.user_id,
+                with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
+                    session = self._session_service.session(
+                        ctx,
+                        msg.session_id,
+                        session_uri=msg.session_uri,
                     )
-                    return
-                await session.load()
-                await session.resume_queued_commit(msg)
+                    if not await session.exists():
+                        await tracker.fail(
+                            msg.task_id,
+                            f"Session '{msg.session_id}' no longer exists",
+                            account_id=ctx.account_id,
+                            user_id=ctx.user.user_id,
+                        )
+                        return
+                    await session.load()
+                    await session.resume_queued_commit(msg)
             except asyncio.CancelledError:
                 task = await tracker.get(
                     msg.task_id,
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
                 )
-                if task is not None and (
-                    task.status == TaskStatus.CANCELLED or task.stage == "cancelling"
+                if task is not None and task.status in (
+                    TaskStatus.CANCELLING,
+                    TaskStatus.CANCELLED,
                 ):
-                    await tracker.mark_cancelled(
-                        msg.task_id,
-                        account_id=ctx.account_id,
-                        user_id=ctx.user.user_id,
-                    )
                     return
                 raise
             finally:
