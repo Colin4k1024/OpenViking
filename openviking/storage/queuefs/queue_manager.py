@@ -30,8 +30,8 @@ def init_queue_manager(
     timeout: int = 10,
     mount_point: str = "/queue",
     max_concurrent_embedding: int = 10,
-    max_concurrent_semantic: int = 64,
-    max_concurrent_external_parse: int = 4,
+    max_concurrent_semantic: int = 32,
+    max_concurrent_parse: int = 4,
 ) -> "QueueManager":
     """Initialize QueueManager singleton.
 
@@ -49,7 +49,7 @@ def init_queue_manager(
         mount_point=mount_point,
         max_concurrent_embedding=max_concurrent_embedding,
         max_concurrent_semantic=max_concurrent_semantic,
-        max_concurrent_external_parse=max_concurrent_external_parse,
+        max_concurrent_parse=max_concurrent_parse,
     )
     return _instance
 
@@ -81,8 +81,8 @@ class QueueManager:
         timeout: int = 10,
         mount_point: str = "/queue",
         max_concurrent_embedding: int = 10,
-        max_concurrent_semantic: int = 64,
-        max_concurrent_external_parse: int = 4,
+        max_concurrent_semantic: int = 32,
+        max_concurrent_parse: int = 4,
     ):
         """Initialize QueueManager."""
         self._agfs = agfs
@@ -90,7 +90,7 @@ class QueueManager:
         self.mount_point = mount_point
         self._max_concurrent_embedding = max_concurrent_embedding
         self._max_concurrent_semantic = max_concurrent_semantic
-        self._max_concurrent_external_parse = max_concurrent_external_parse
+        self._max_concurrent_external_parse = max_concurrent_parse
         self._queues: Dict[str, NamedQueue] = {}
         self._started = False
         self._queue_threads: Dict[str, threading.Thread] = {}
@@ -168,7 +168,7 @@ class QueueManager:
 
         if queue.name == self.EMBEDDING:
             max_concurrent = self._max_concurrent_embedding
-        elif queue.name in {self.EXTERNAL_PARSE, self.SESSION_COMMIT}:
+        elif queue.name in {self.EXTERNAL_PARSE, self.SESSION_COMMIT, self.ADD_RESOURCE}:
             max_concurrent = self._max_concurrent_external_parse
         else:
             max_concurrent = self._max_concurrent_semantic

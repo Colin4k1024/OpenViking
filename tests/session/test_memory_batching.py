@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -58,6 +58,7 @@ class NorthwestTripMockVLM:
         return (content * 10)[:2000]
 
 
+@skip_if_not_manual
 @pytest.mark.asyncio
 async def test_manual_memory_batching_100_files(monkeypatch):
     """
@@ -113,10 +114,8 @@ async def test_manual_memory_batching_100_files(monkeypatch):
 
     mock_fs = MockVikingFS()
 
-    # 3. 模拟 Tracker 和 WaitTracker
+    # 3. 模拟 WaitTracker
     mock_wait_tracker = MagicMock()
-    mock_embedding_tracker = MagicMock()
-    mock_embedding_tracker.register = AsyncMock()
 
     # 使用 patch.multiple 来模拟多个 get_xxx 方法
     with (
@@ -128,10 +127,6 @@ async def test_manual_memory_batching_100_files(monkeypatch):
         patch(
             "openviking.storage.queuefs.semantic_processor.get_request_wait_tracker",
             return_value=mock_wait_tracker,
-        ),
-        patch(
-            "openviking.storage.queuefs.embedding_tracker.EmbeddingTaskTracker.get_instance",
-            return_value=mock_embedding_tracker,
         ),
     ):
         # 4. 初始化 Processor 并设置并发
@@ -184,7 +179,7 @@ async def test_manual_memory_batching_100_files(monkeypatch):
     # 100次 摘要生成 + 1次 overview(L1) + 1次 abstract(L0)
     # 因为 read_file 也被 mock 了，所以构造过程不再消耗 call_count
     assert mock_vlm.call_count >= 102
-    assert mock_embedding_tracker.register.called
+    assert mock_wait_tracker.mark_semantic_done.called
 
     print("[Manual Test] 分批逻辑压力测试及并发验证成功。")
 

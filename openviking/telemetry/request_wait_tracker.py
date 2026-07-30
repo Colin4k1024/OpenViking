@@ -73,15 +73,6 @@ class RequestWaitTracker:
                 return
             state.pending_embedding_roots.add(root_id)
 
-    def record_embedding_processed(self, telemetry_id: str, delta: int = 1) -> None:
-        if not telemetry_id:
-            return
-        with self._lock:
-            state = self._states.get(telemetry_id)
-            if state is None:
-                return
-            state.embedding_processed += max(delta, 0)
-
     def record_embedding_requeue(self, telemetry_id: str, delta: int = 1) -> None:
         if not telemetry_id:
             return
@@ -90,17 +81,6 @@ class RequestWaitTracker:
             if state is None:
                 return
             state.embedding_requeue_count += max(delta, 0)
-
-    def record_embedding_error(self, telemetry_id: str, message: str) -> None:
-        if not telemetry_id:
-            return
-        with self._lock:
-            state = self._states.get(telemetry_id)
-            if state is None:
-                return
-            state.embedding_error_count += 1
-            if message:
-                state.embedding_errors.append(message)
 
     def mark_semantic_done(
         self,
