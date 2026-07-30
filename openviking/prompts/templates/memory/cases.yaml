@@ -1,15 +1,20 @@
 memory_type: cases
 description: |
-  Language policy: generated natural-language text must use {{ language }}. If the source is multilingual, use the current task user's primary language as {{ language }}; if unclear, use the latest user message language. Preserve stable identifiers, code-like tokens, tool/API names, enum values, exact IDs, paths, dates, amounts, and other structured literals unchanged. When updating an existing case, prefer its existing name and language style to avoid translated duplicates.
+  Language policy: generated natural-language text must use {{ language }}. If the source is multilingual, use the current task user's primary language as {{ language }}; if unclear, use the latest user message language. Preserve stable code-like tokens, tool/API names, enum values, and output formats. Generalize one-run IDs, names, paths, dates, amounts, percentages, counts, and filenames into semantic parameter roles. When updating an existing case, prefer its existing name and language style to avoid translated duplicates.
 
-  A trainable/evaluable case extracted from a real session commit.
+  A reusable task-family Case extracted from a real session commit.
 
   Extract ONLY when the conversation contains a concrete user task plus enough assistant execution,
   tool-use evidence, or final result to define what a good future rollout should do.
   Skip pure chit-chat, simple factual Q&A, or fragments with no observable task outcome.
 
-  The case is not an experience instruction. It defines the scenario and rubric used by the
-  training pipeline to learn better experience memories from this commit rollout.
+  A Case groups independent sessions that share the same goal, subject, action pattern, and
+  observable completion boundary. Split compound tasks into independent Case units. Exact IDs,
+  dates, amounts, paths, and other one-run parameters belong to trajectory evidence, not identity.
+
+  The case is not an Experience instruction and must not copy evaluator rubrics, weights, hidden
+  answers, or benchmark-only criteria. It describes a reusable task family and links to reusable
+  Experiences.
 
 directory: "viking://user/{{ user_space }}/memories/cases"
 filename_template: "{{ case_name }}.md"
@@ -21,14 +26,11 @@ content_template: |
   ## Task Signature
   {{ task_signature }}
 
-  ## Input
+  ## Stable Preconditions
   {{ input }}
 
-  ## Rubric
-  {{ rubric }}
-
-  ## Evidence
-  {{ evidence }}
+  ## Situation
+  {{ situation }}
 
   ## Linked Experiences
   {%- for link in links or [] %}
@@ -40,11 +42,13 @@ content_template: |
 embedding_template: |-
   {{ case_name }}
 
+  {{ case_identity }}
+
   {{ task_signature }}
 
   {{ input }}
 
-  {{ rubric }}
+  {{ situation }}
 overview_template: |-
   # Cases Overview
   {% for item in items %}
@@ -55,10 +59,23 @@ fields:
   - name: case_name
     type: string
     description: |
-      Short stable case name for this concrete training/evaluation sample.
+      Short stable name for this reusable task family.
       Must be written in {{ language }}.
       {% if language == 'en' %}Use lowercase snake_case, max 5 words.{% else %}Use a concise noun phrase, max 15 characters.{% endif %}
       Name the task boundary, not the whole conversation.
+    merge_op: immutable
+
+  - name: case_identity
+    type: string
+    description: |
+      Compact JSON object string used internally to decide whether independent sessions belong
+      to the same Case. Required keys:
+      {"goal":"final desired state","subject":"object type and scope","action_pattern":"core reusable behavior","success_boundary":"observable done state","context_constraints":["stable strategy-changing preconditions"],"facets":{"domain":"optional","channel":"optional","output_format":"optional","tools":"optional"}}
+      Generalize exact IDs, dates, amounts, paths, counts, and names. success_boundary must be
+      inferred from the user's task and observable execution outcome; never copy evaluator rubric
+      text, weights, hidden answers, or benchmark criteria. Do not add parameter_slots or store
+      current parameter values in this field. Describe only the stable role of a parameter when it
+      changes strategy.
     merge_op: immutable
 
   - name: task_signature
@@ -68,27 +85,33 @@ fields:
       Write generated natural-language text in {{ language }}.
       Describe the reusable task intent, object/effect boundary, and success condition in one sentence.
       Generalize private identifiers, exact IDs, names, amounts, dates, and paths.
-    merge_op: immutable
+    merge_op: replace
 
   - name: input
     type: string
     description: |
       Compact JSON object string describing the executable case input.
-      JSON keys must remain stable English identifiers; generated string values should use {{ language }} while preserving exact source literals needed for task matching.
-      Include the user request summary and any stable preconditions needed to reproduce/evaluate the task.
-      Example: {"summary":"用户要求处理重复预订并保留有效订单","preconditions":["存在两个相似订单候选"]}
-    merge_op: immutable
+      JSON keys must remain stable English identifiers; generated string values should use {{ language }}.
+      Preserve only stable tool names, enum values, and structured literals that change strategy.
+      Include stable preconditions and variable parameter types that affect strategy. Do not retain
+      exact one-run IDs, names, dates, amounts, percentages, counts, paths, or filenames. Every
+      one-run value that affects execution must instead be represented by a concise semantic role
+      in variable_types. Always return variable_types as a list; use an empty list when there are
+      no variable parameters. Do not add a parameter_slots field.
+      Example: {"summary":"处理重复预订并保留有效订单","preconditions":["存在多个相似订单候选"],"variable_types":["订单标识","时间范围"]}
+    merge_op: replace
 
   - name: rubric
     type: string
     description: |
-      Compact JSON object string defining what good means and how to check it.
+      Internal compact JSON object defining reusable observable success criteria.
       JSON keys must remain stable English identifiers; generated string values should use {{ language }} while preserving exact tool names, required literals, and observable evaluation labels.
       Required shape:
       {"name":"...","description":"...","criteria":[{"name":"...","description":"observable success condition","required":true,"weight":1.0}]}
-      Criteria must be observable from rollout messages/tool results; include both success rate and execution efficiency when relevant.
+      Criteria must be inferred from the user request and rollout evidence. Never copy evaluator
+      rubric text, weights, hidden answers, or benchmark-only criteria.
       Use 1-5 criteria. Weight values should be positive.
-    merge_op: immutable
+    merge_op: replace
 
   - name: evidence
     type: string
@@ -96,4 +119,43 @@ fields:
       Brief generalized evidence from the commit conversation explaining why this case is useful.
       Write generated natural-language text in {{ language }}.
       Do not include private raw identifiers, exact IDs, personal contact values, or full tool payloads.
-    merge_op: immutable
+    merge_op: replace
+
+  - name: situation
+    type: string
+    description: |
+      Concise reusable description of when this task family applies. Keep only conditions shared
+      across independent sessions; do not retain one-run identifiers or transient tool state.
+    merge_op: replace
+
+  - name: case_status
+    type: string
+    description: |
+      System-managed lifecycle state: draft, promoted, degraded, or archived.
+    merge_op: replace
+    init_value: draft
+    system_managed: true
+
+  - name: source_count
+    type: int64
+    description: |
+      System-managed count of independent source sessions.
+    merge_op: replace
+    init_value: "0"
+    system_managed: true
+
+  - name: last_compacted_source_count
+    type: int64
+    description: |
+      System-managed source count at the most recent full body compaction.
+    merge_op: replace
+    init_value: "0"
+    system_managed: true
+
+  - name: last_compacted_version
+    type: int64
+    description: |
+      System-managed memory version produced by the most recent full body compaction.
+    merge_op: replace
+    init_value: "0"
+    system_managed: true

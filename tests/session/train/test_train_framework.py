@@ -2496,6 +2496,42 @@ async def test_session_commit_policy_trainer_can_disable_case_spec_from_rollout_
 
 
 @pytest.mark.asyncio
+async def test_session_commit_policy_trainer_skips_empty_rollout_without_case_spec():
+    from openviking.session.train import SessionCommitPolicyTrainer
+
+    client = FakeSessionCommitClient()
+    trainer = SessionCommitPolicyTrainer(
+        client=client,
+        run_id="run1",
+        poll_interval_seconds=0.01,
+        commit_case_spec_enabled=False,
+    )
+    rollout = Rollout(
+        case=_case(),
+        messages=[],
+        policy_snapshot_id="snapshot-1",
+        evaluation=RubricEvaluation(
+            passed=False,
+            score=0.0,
+            criterion_results=[],
+            feedback=[],
+        ),
+        metadata={"rollout_failed": True},
+    )
+
+    result = await trainer.train_rollouts([rollout], _policy_set())
+
+    commit_result = result.apply_result.metadata["commit_results"][0]
+    assert commit_result["task_status"] == "skipped"
+    assert commit_result["skipped_reason"] == "empty_rollout_messages"
+    assert result.apply_result.metadata["committed_rollout_count"] == 0
+    assert result.apply_result.metadata["skipped_rollout_count"] == 1
+    assert client.created_sessions == []
+    assert client.messages == {}
+    assert client.committed_sessions == []
+
+
+@pytest.mark.asyncio
 async def test_session_commit_policy_trainer_case_spec_override_wins_over_rollout_metadata():
     from openviking.session.train import SessionCommitPolicyTrainer
 

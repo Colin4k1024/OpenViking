@@ -21,6 +21,25 @@ VOLCENGINE_CLIENT_REQUEST_ID_HEADER = "X-Client-Request-Id"
 VOLCENGINE_CLIENT_REQUEST_ID = "ToB-direct,OpenViking_Service,openviking-service_cn-beijing"
 
 
+class VolcEngineTextResponse(str):
+    """String-compatible text response that retains provider termination metadata."""
+
+    finish_reason: str
+    usage: Dict[str, Any]
+
+    def __new__(
+        cls,
+        content: str,
+        *,
+        finish_reason: str = "stop",
+        usage: Optional[Dict[str, Any]] = None,
+    ):
+        instance = super().__new__(cls, content)
+        instance.finish_reason = finish_reason
+        instance.usage = dict(usage or {})
+        return instance
+
+
 def _build_volcengine_headers(extra_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
     headers = dict(extra_headers or {})
     if not any(k.lower() == VOLCENGINE_CLIENT_REQUEST_ID_HEADER.lower() for k in headers):
@@ -57,28 +76,38 @@ class VolcEngineVLM(OpenAIVLM):
         return tool_calls
 
     def _build_vlm_response(self, response, has_tools: bool) -> Union[str, VLMResponse]:
-        """Build response from Chat Completions response. Returns str or VLMResponse based on has_tools."""
+        """Build a response while retaining finish_reason for text-only calls."""
         choice = response.choices[0]
         message = choice.message
         if hasattr(message, "tool_calls") and message.tool_calls:
             tracer.info(f"message.tool_calls={message.tool_calls}")
+        usage = {}
+        if hasattr(response, "usage") and response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None),
+            }
         if has_tools:
-            usage = {}
-            if hasattr(response, "usage") and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None),
-                }
-
             return VLMResponse(
                 content=message.content,
                 tool_calls=self._parse_tool_calls(message),
                 finish_reason=choice.finish_reason or "stop",
                 usage=usage,
             )
-        return message.content or ""
+        return VolcEngineTextResponse(
+            message.content or "",
+            finish_reason=choice.finish_reason or "stop",
+            usage=usage,
+        )
+
+    def _clean_text_response(self, response: str) -> VolcEngineTextResponse:
+        return VolcEngineTextResponse(
+            self._clean_response(str(response)),
+            finish_reason=getattr(response, "finish_reason", "stop") or "stop",
+            usage=getattr(response, "usage", None),
+        )
 
     def get_client(self):
         """Get sync client"""
@@ -144,7 +173,7 @@ class VolcEngineVLM(OpenAIVLM):
         result = self._build_vlm_response(response, has_tools=bool(tools))
         if tools:
             return result
-        return self._clean_response(str(result))
+        return self._clean_text_response(result)
 
     @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=False)
     async def get_completion_async(
@@ -190,7 +219,7 @@ class VolcEngineVLM(OpenAIVLM):
                 result = self._build_vlm_response(response, has_tools=bool(tools))
                 if tools:
                     return result
-                content = self._clean_response(str(result))
+                content = self._clean_text_response(result)
                 if content:
                     tracer.info(f"message.content={content}")
                 return content
@@ -360,7 +389,7 @@ class VolcEngineVLM(OpenAIVLM):
         result = self._build_vlm_response(response, has_tools=bool(tools))
         if tools:
             return result
-        return self._clean_response(str(result))
+        return self._clean_text_response(result)
 
     async def get_vision_completion_async(
         self,
@@ -404,4 +433,4 @@ class VolcEngineVLM(OpenAIVLM):
         result = self._build_vlm_response(response, has_tools=bool(tools))
         if tools:
             return result
-        return self._clean_response(str(result))
+        return self._clean_text_response(result)

@@ -674,6 +674,47 @@ async def test_v3_training_case_spec_fast_path_skips_user_memory_extraction_and_
 
 
 @pytest.mark.asyncio
+async def test_v3_case_spec_write_uses_shared_streaming_aggregator(monkeypatch):
+    requests = []
+
+    class FakeFS:
+        async def read_file(self, uri, ctx=None):
+            del uri, ctx
+            return ""
+
+    class FakeStreamingUpdater:
+        async def submit(self, request):
+            requests.append(request)
+            result = MemoryUpdateResult()
+            result.add_written(request.operations.upsert_operations[0].uris[0])
+            return SimpleNamespace(operations=request.operations, apply_result=result)
+
+    compressor = SessionCompressorV3(vikingdb=None)
+    monkeypatch.setattr("openviking.session.compressor_v3.get_viking_fs", lambda: FakeFS())
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.get_streaming_memory_updater",
+        AsyncMock(return_value=FakeStreamingUpdater()),
+    )
+
+    result = await compressor._write_training_case_memory(
+        case=_training_case(),
+        messages=_messages(),
+        ctx=_ctx(),
+        session_id="session-1",
+        archive_uri="",
+        strict_extract_errors=True,
+    )
+
+    assert result.result.written_uris
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.messages == _messages()
+    assert request.strict_extract_errors is True
+    assert request.metadata["session_id"] == "session-1"
+    assert request.operations.upsert_operations[0].memory_type == "cases"
+
+
+@pytest.mark.asyncio
 async def test_v3_training_case_spec_fast_path_not_used_with_user_memory_policy():
     extracted = False
     trained = []
