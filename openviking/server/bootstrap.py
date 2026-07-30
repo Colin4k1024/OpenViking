@@ -21,9 +21,13 @@ from openviking.server.app import (
     WORKER_WITH_BOT_ENV,
     create_app,
 )
-from openviking.server.config import get_server_url_from_server_data, load_server_config
+from openviking.server.config import (
+    get_server_url_from_server_data,
+    load_server_config,
+    map_bind_host_to_loopback,
+)
 from openviking_cli.utils.config import OPENVIKING_CONFIG_ENV
-from openviking_cli.utils.config.config_loader import resolve_config_path
+from openviking_cli.utils.config.config_loader import load_json_config, resolve_config_path
 from openviking_cli.utils.config.consts import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_OV_CONF,
@@ -255,7 +259,11 @@ def main():
     bot_process: Optional[BotProcess] = None
     if config.with_bot:
         bot_port = args.bot_port
-        config.bot_api_url = f"http://{VIKINGBOT_DEFAULT_HOST}:{bot_port}"
+        bot_gateway_host = (
+            _read_bot_gateway_host(resolved_config_path) or VIKINGBOT_DEFAULT_HOST
+        )
+        bot_proxy_host = map_bind_host_to_loopback(bot_gateway_host)
+        config.bot_api_url = f"http://{bot_proxy_host}:{bot_port}"
         _abort_if_port_in_use(bot_port, "vikingbot gateway")
         print(f"Bot API proxy enabled, forwarding to {config.bot_api_url}")
         # Determine if bot logging should be enabled
@@ -273,6 +281,7 @@ def main():
             enable_bot_logging,
             bot_log_dir,
             bot_port,
+            host=bot_gateway_host,
             config_path=args.config,
             managed_server_url=get_server_url_from_server_data(config),
         )
@@ -337,10 +346,35 @@ def _handle_vikingbot_failure(output: str, returncode: int) -> None:
         print(f"\nDetailed error:\n{output}", file=sys.stderr)
 
 
+def _read_bot_gateway_host(resolved_config_path: Optional[Path]) -> Optional[str]:
+    """Read ``bot.gateway.host`` from a resolved ov.conf ``Path``.
+
+    Returns ``None`` when the path is ``None`` or the key is absent / not a
+    string.  The caller is responsible for resolving and validating the
+    config path (as ``main()`` already does) so this helper does not repeat
+    resolution or swallow validation errors.
+    """
+    if resolved_config_path is None:
+        return None
+    data = load_json_config(resolved_config_path)
+    bot_section = data.get("bot") or {}
+    if not isinstance(bot_section, dict):
+        return None
+    gateway = bot_section.get("gateway") or {}
+    if not isinstance(gateway, dict):
+        return None
+    host = gateway.get("host")
+    if not isinstance(host, str):
+        return None
+    host = host.strip()
+    return host or None
+
+
 def _start_vikingbot_gateway(
     enable_logging: bool,
     log_dir: str,
     port: int = VIKINGBOT_DEFAULT_PORT,
+    host: Optional[str] = None,
     config_path: Optional[str] = None,
     managed_server_url: Optional[str] = None,
 ) -> Optional[BotProcess]:
@@ -368,7 +402,8 @@ def _start_vikingbot_gateway(
         print("  uv pip install -e '.[bot,dev]'")
         return None
 
-    vikingbot_cmd.extend(["--host", VIKINGBOT_DEFAULT_HOST, "--port", str(port)])
+    effective_host = host if host else VIKINGBOT_DEFAULT_HOST
+    vikingbot_cmd.extend(["--host", effective_host, "--port", str(port)])
 
     # Prepare logging
     log_file = None

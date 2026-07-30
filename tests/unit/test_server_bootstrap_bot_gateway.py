@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 
+import json
+
 import openviking.server.bootstrap as bootstrap
 from openviking_cli.utils.config.consts import OPENVIKING_CLI_CONFIG_ENV
 
@@ -13,7 +15,7 @@ class _FakeProcess:
         return None
 
 
-def test_start_vikingbot_gateway_forces_localhost_host(monkeypatch):
+def test_start_vikingbot_gateway_defaults_to_localhost_host(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/vikingbot")
@@ -39,6 +41,101 @@ def test_start_vikingbot_gateway_forces_localhost_host(monkeypatch):
     )
 
 
+def test_start_vikingbot_gateway_honors_host_argument(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "/usr/bin/vikingbot")
+    monkeypatch.delenv(OPENVIKING_CLI_CONFIG_ENV, raising=False)
+
+    def _fake_popen(cmd, stdout=None, stderr=None, text=None, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return _FakeProcess()
+
+    monkeypatch.setattr(bootstrap.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(bootstrap.time, "sleep", lambda _: None)
+
+    process = bootstrap._start_vikingbot_gateway(
+        enable_logging=False,
+        log_dir="/tmp/logs",
+        host="0.0.0.0",
+    )
+
+    assert process is not None
+    host_idx = captured["cmd"].index("--host")
+    assert captured["cmd"][host_idx + 1] == "0.0.0.0"
+
+
+def test_read_bot_gateway_host_reads_from_config(tmp_path):
+    conf_path = tmp_path / "ov.conf"
+    conf_path.write_text(
+        json.dumps({"bot": {"gateway": {"host": "0.0.0.0", "port": 18790}}}),
+        encoding="utf-8",
+    )
+
+    host = bootstrap._read_bot_gateway_host(conf_path)
+    assert host == "0.0.0.0"
+
+
+def test_read_bot_gateway_host_returns_none_when_absent(tmp_path):
+    conf_path = tmp_path / "ov.conf"
+    conf_path.write_text("{}", encoding="utf-8")
+
+    assert bootstrap._read_bot_gateway_host(conf_path) is None
+    assert bootstrap._read_bot_gateway_host(None) is None
+
+
+def test_read_bot_gateway_host_ignores_non_string_host(tmp_path):
+    conf_path = tmp_path / "ov.conf"
+    conf_path.write_text(
+        json.dumps({"bot": {"gateway": {"host": 123}}}),
+        encoding="utf-8",
+    )
+    assert bootstrap._read_bot_gateway_host(conf_path) is None
+
+
+def test_read_bot_gateway_host_strips_whitespace_and_empty(tmp_path):
+    conf_path = tmp_path / "ov.conf"
+    conf_path.write_text(
+        json.dumps({"bot": {"gateway": {"host": "  0.0.0.0  "}}}),
+        encoding="utf-8",
+    )
+    assert bootstrap._read_bot_gateway_host(conf_path) == "0.0.0.0"
+
+    # Empty string (after strip) returns None
+    conf_path.write_text(
+        json.dumps({"bot": {"gateway": {"host": "   "}}}),
+        encoding="utf-8",
+    )
+    assert bootstrap._read_bot_gateway_host(conf_path) is None
+
+
+def test_resolved_config_path_env_file_feeds_bot_gateway_host(monkeypatch, tmp_path):
+    """Regression: config resolution through env/default path, not just explicit --config.
+
+    ``main()`` calls ``resolve_config_path(args.config, ...)`` which honors
+    ``OPENVIKING_CONFIG_FILE`` and the default ``~/.openviking/ov.conf``.
+    The bot gateway host must come from that same resolved path, not just
+    the explicit ``args.config`` argument.
+    """
+    from openviking_cli.utils.config.config_loader import resolve_config_path
+    from openviking_cli.utils.config.consts import OPENVIKING_CONFIG_ENV
+
+    env_conf = tmp_path / "from-env.conf"
+    env_conf.write_text(
+        json.dumps({"bot": {"gateway": {"host": "192.168.1.10"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(OPENVIKING_CONFIG_ENV, str(env_conf))
+
+    # Simulate what main() does: resolve without explicit --config argument
+    resolved = resolve_config_path(None, OPENVIKING_CONFIG_ENV, "ov.conf")
+    assert resolved == env_conf
+
+    host = bootstrap._read_bot_gateway_host(resolved)
+    assert host == "192.168.1.10"
+
+
 def test_start_vikingbot_gateway_uses_custom_port(monkeypatch):
     captured = {}
 
@@ -60,6 +157,7 @@ def test_start_vikingbot_gateway_uses_custom_port(monkeypatch):
     )
 
     assert process is not None
+    # Host defaults to 127.0.0.1 when not explicitly provided
     assert captured["cmd"][captured["cmd"].index("--host") + 1] == "127.0.0.1"
     assert captured["cmd"][captured["cmd"].index("--port") + 1] == "19990"
 
