@@ -397,6 +397,18 @@ class BaseClient(ABC):
         ...
 
     @abstractmethod
+    async def extract_session(
+        self,
+        session_id: str,
+        *,
+        memory_policy: Optional[Dict[str, Any]] = None,
+        instruction: str = "",
+        additional_session_ids: Optional[List[str]] = None,
+    ) -> Any:
+        """Extract memories once from the ordered messages of one or more sessions."""
+        ...
+
+    @abstractmethod
     async def add_message(
         self,
         session_id: str,

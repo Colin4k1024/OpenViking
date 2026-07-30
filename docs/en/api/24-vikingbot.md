@@ -117,8 +117,9 @@ Start an asynchronous, Skill-driven Compile task. VikingBot loads the selected S
 |-------|------|----------|---------|-------------|
 | `from` | string[] | Yes | - | One or more source directories |
 | `to` | string | Yes | - | Target Resource or Memory directory, or a supported Skill namespace |
-| `skill` | string | Yes | - | Skill directory or its `SKILL.md` URI |
-| `reason` | string | No | Skill-driven default | Additional instructions for this Compile run |
+| `skill` | string | No | - | Skill directory or its `SKILL.md` URI; omit for session-to-memory extraction |
+| `reason` | string | No | Mode-specific default | Additional instructions for this Compile run |
+| `disable_default_instruction` | boolean | No | `false` | In memory mode, omit Compile's default additional instruction when `reason` is absent |
 
 **HTTP API**
 
@@ -150,6 +151,22 @@ ov compile \
 ```
 
 `--wait` polls the status endpoint until the task reaches a terminal state. `--timeout` limits only the local wait and does not cancel the server task.
+
+Omit `--skill` to run the default four-type memory extractor once over one or more sessions and
+their existing memory store. Sessions are concatenated in `--from` order. The memory input and
+output must be the same store:
+
+```bash
+ov compile \
+  --from viking://user/default/sessions/locomo-batch-001 \
+  --from viking://user/default/sessions/locomo-batch-002 \
+  --from viking://user/default/peers/conv-26/memories \
+  --to viking://user/default/peers/conv-26/memories \
+  --no-default-instruction \
+  --wait
+```
+
+`--no-default-instruction` only removes Compile's default additional extraction instruction. It does not disable the extractor's schemas, system prompt, or access controls. An explicit `--reason` is still applied.
 
 The `direct` backend runs Compile `exec` commands with the Bot host's permissions. `bot.sandbox.backends.direct.allow_compile_exec` defaults to `false`, so Compile omits `exec` while ordinary Wiki and artifact generation can still run through file tools. A Skill that declares `requires.bins` or `requires.env` fails with `SKILL_CAPABILITY_UNAVAILABLE` before any command probe runs. Setting the option to `true` is an explicit unsafe opt-in; isolated backends with filesystem and network policies are recommended for CLI-dependent Skills. Admission overflow returns `429 RESOURCE_EXHAUSTED`.
 

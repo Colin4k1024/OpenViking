@@ -28,8 +28,8 @@ from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.memory.utils.uri import render_template
 from openviking.session.skill import SkillOperationUpdater, dedup_session_skill_operations
 from openviking.session.skill.session_skill_context_provider import SESSION_SKILL_MEMORY_TYPE
-from openviking.storage.vikingdb_manager import VikingDBManager
 from openviking.storage.viking_fs import VikingFS, get_viking_fs
+from openviking.storage.vikingdb_manager import VikingDBManager
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.utils.skill_processor import SkillProcessor
 from openviking_cli.session.user_id import UserIdentifier
@@ -234,6 +234,7 @@ class SessionCompressorV2:
         allowed_memory_types: Optional[set[str]] = None,
         allow_self_memory: bool = True,
         allowed_peer_ids: Optional[set[str]] = None,
+        extraction_instruction: str = "",
     ) -> List[Context]:
         """Extract long-term memories from messages using v2 templating system.
 
@@ -302,6 +303,7 @@ class SessionCompressorV2:
             context_provider = SessionExtractContextProvider(
                 messages=messages,
                 latest_archive_overview=latest_archive_overview,
+                extraction_instruction=extraction_instruction,
                 isolation_handler=None,
                 ctx=ctx,
                 viking_fs=viking_fs,

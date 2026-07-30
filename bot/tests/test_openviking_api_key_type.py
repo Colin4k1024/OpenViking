@@ -198,6 +198,22 @@ def test_viking_client_actor_peer_id_sets_actor_header(monkeypatch):
     assert first.kwargs["actor_peer_id"] == client.actor_peer_id
 
 
+def test_viking_client_applies_explicit_timeout_to_request_connection(monkeypatch):
+    monkeypatch.setattr(ov_server_module, "load_config", lambda: _make_config("root"))
+
+    VikingClient(
+        connection={
+            "api_key": "request-key",
+            "account_id": "acct",
+            "user_id": "alice",
+            "api_key_type": "root",
+        },
+        timeout=1800,
+    )
+
+    assert _DummyHTTPClient.instances[0].kwargs["timeout"] == 1800
+
+
 def test_viking_client_uses_effective_auth_mode_for_dev(monkeypatch):
     config = _make_config("user", mode="remote")
     config.ov_server.effective_auth_mode = "dev"

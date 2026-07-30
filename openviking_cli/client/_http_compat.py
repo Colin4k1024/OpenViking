@@ -233,6 +233,29 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         )
         return self._handle_response_data(response).get("result", {})
 
+    async def extract_session(
+        self,
+        session_id: str,
+        *,
+        memory_policy: Dict[str, Any] | None = None,
+        instruction: str = "",
+        additional_session_ids: list[str] | None = None,
+    ) -> Any:
+        payload: Dict[str, Any] = {}
+        if memory_policy is not None:
+            payload["memory_policy"] = memory_policy
+        if instruction:
+            payload["instruction"] = instruction
+        if additional_session_ids:
+            payload["additional_session_ids"] = additional_session_ids
+        session_path = self._path_segment(session_id)
+        response = await self._request(
+            "POST",
+            f"/api/v1/sessions/{session_path}/extract",
+            json=payload,
+        )
+        return self._handle_response_data(response).get("result", [])
+
 
 class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
     def __init__(self, *args, **kwargs):
@@ -287,5 +310,22 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
                 keep_recent_turn_count=keep_recent_turn_count,
                 retained_message_token_budget=retained_message_token_budget,
                 min_raw_tail_steps=min_raw_tail_steps,
+            )
+        )
+
+    def extract_session(
+        self,
+        session_id: str,
+        *,
+        memory_policy: Dict[str, Any] | None = None,
+        instruction: str = "",
+        additional_session_ids: list[str] | None = None,
+    ) -> Any:
+        return run_async(
+            self._async_client.extract_session(
+                session_id,
+                memory_policy=memory_policy,
+                instruction=instruction,
+                additional_session_ids=additional_session_ids,
             )
         )

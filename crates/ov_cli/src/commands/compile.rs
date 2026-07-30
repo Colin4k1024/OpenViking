@@ -10,8 +10,9 @@ pub async fn run(
     client: &HttpClient,
     from_uris: Vec<String>,
     to: String,
-    skill: String,
+    skill: Option<String>,
     reason: Option<String>,
+    disable_default_instruction: bool,
     wait: bool,
     timeout: Option<f64>,
     output_format: OutputFormat,
@@ -26,7 +27,16 @@ pub async fn run(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let accepted = client
-        .create_compile(&sources, to.trim(), skill.trim(), reason)
+        .create_compile(
+            &sources,
+            to.trim(),
+            skill
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            reason,
+            disable_default_instruction,
+        )
         .await?;
     if !wait {
         render_accepted(&accepted, output_format, compact);
@@ -114,7 +124,7 @@ fn render_completed(value: &CompileTaskStatus, format: OutputFormat, compact: bo
         .unwrap_or_else(|| CompileResult {
             from_uris: Vec::new(),
             to: String::new(),
-            skill: String::new(),
+            skill: None,
             okf_version: "0.1".into(),
             created: Vec::new(),
             updated: Vec::new(),

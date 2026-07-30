@@ -46,6 +46,7 @@ class VikingClient:
         agent_id: Optional[str] = None,
         connection: Optional[Mapping[str, Any]] = None,
         actor_peer_id: Optional[str] = None,
+        timeout: Optional[float] = None,
         config: "Config | None" = None,
     ):
         if agent_id is None:
@@ -68,6 +69,7 @@ class VikingClient:
 
         self._request_connection = self._normalize_connection(connection)
         self._request_role: str | None = None
+        self._request_timeout = timeout
 
         self.admin_user_client = None
         self._user_clients = {}
@@ -83,7 +85,7 @@ class VikingClient:
 
         if self._is_dev_mode():
             client_kwargs = {"url": openviking_config.server_url}
-            self._apply_actor_peer_scope(client_kwargs)
+            self._apply_client_options(client_kwargs)
             if agent_id is None or _is_session_key(agent_id):
                 self.client = ov.AsyncHTTPClient(**client_kwargs)
                 self.agent_id = "default"
@@ -111,7 +113,7 @@ class VikingClient:
             remote_client_kwargs["account"] = openviking_config.account_id
             remote_client_kwargs["user"] = openviking_config.admin_user_id
 
-        self._apply_actor_peer_scope(remote_client_kwargs)
+        self._apply_client_options(remote_client_kwargs)
         self.client = ov.AsyncHTTPClient(**remote_client_kwargs)
 
     @staticmethod
@@ -208,7 +210,7 @@ class VikingClient:
         if self.admin_user_id:
             remote_client_kwargs["user"] = self.admin_user_id
 
-        self._apply_actor_peer_scope(remote_client_kwargs)
+        self._apply_client_options(remote_client_kwargs)
         self.client = ov.AsyncHTTPClient(**remote_client_kwargs)
 
     async def _initialize(self):
@@ -224,6 +226,7 @@ class VikingClient:
         agent_id: Optional[str] = None,
         connection: Optional[Mapping[str, Any]] = None,
         actor_peer_id: Optional[str] = None,
+        timeout: Optional[float] = None,
         config: "Config | None" = None,
     ):
         """Factory method to create and initialize a VikingClient instance."""
@@ -232,6 +235,7 @@ class VikingClient:
             agent_id=agent_id,
             connection=connection,
             actor_peer_id=actor_peer_id,
+            timeout=timeout,
             config=config,
         )
         await instance._initialize()
@@ -362,9 +366,11 @@ class VikingClient:
     def _peer_id(value: Optional[str]) -> Optional[str]:
         return _peer_id_from_external_id(str(value)) if value is not None else None
 
-    def _apply_actor_peer_scope(self, client_kwargs: Dict[str, Any]) -> None:
+    def _apply_client_options(self, client_kwargs: Dict[str, Any]) -> None:
         if self.actor_peer_id:
             client_kwargs["actor_peer_id"] = self.actor_peer_id
+        if self._request_timeout is not None:
+            client_kwargs["timeout"] = self._request_timeout
 
     async def _load_namespace_policy(self) -> None:
         if self._namespace_policy_loaded:
@@ -806,7 +812,7 @@ class VikingClient:
             "user": user_id,
             "profile_enabled": False,
         }
-        self._apply_actor_peer_scope(client_kwargs)
+        self._apply_client_options(client_kwargs)
         client = ov.AsyncHTTPClient(**client_kwargs)
         await client.initialize()
         return client
@@ -1036,11 +1042,7 @@ class VikingClient:
                         "tool_input": tool_input,
                         "tool_output": result_str,
                         "tool_status": explicit_status
-                        or (
-                            "completed"
-                            if tool_info.get("execute_success", True)
-                            else "error"
-                        ),
+                        or ("completed" if tool_info.get("execute_success", True) else "error"),
                         "skill_uri": skill_uri,
                         "duration_ms": float(tool_info.get("duration", 0.0) or 0.0),
                         "prompt_tokens": tool_info.get("input_token"),
@@ -1233,6 +1235,23 @@ class VikingClient:
             session_id,
             keep_recent_count=keep_recent_count,
             **retention_kwargs,
+        )
+
+    async def extract_session(
+        self,
+        session_id: str,
+        *,
+        memory_policy: Optional[Dict[str, Any]] = None,
+        instruction: str = "",
+        additional_session_ids: Optional[List[str]] = None,
+        user_id: Optional[str] = None,
+    ) -> Any:
+        client = await self._session_client_for_user(user_id)
+        return await client.extract_session(
+            session_id,
+            memory_policy=memory_policy,
+            instruction=instruction,
+            additional_session_ids=additional_session_ids,
         )
 
     async def commit(

@@ -8,7 +8,7 @@
 
 ## 1. 概述
 
-`ov compile` 使用指定 Skill 整理 OpenViking 中的材料，并在目标目录生成或更新 Wiki 页面。
+`ov compile` 使用指定 Skill 整理 OpenViking 中的材料，并在目标目录生成或更新 Wiki 页面。未传 `--skill` 时，它也可以把一个或多个 session 与其已有 memory store 交给默认记忆抽取循环，并原地更新该 store。
 
 命令由 VikingBot 执行。`ov` CLI 通过 OpenViking 的 Bot 代理调用 VikingBot，VikingBot 运行 AgentLoop，并使用当前用户身份读取和写入 OpenViking 数据。
 
@@ -43,9 +43,10 @@ ov compile \
 | 参数 | 规则 |
 | --- | --- |
 | `--from` | 必填，可重复，也可使用逗号分隔多个目录 |
-| `--to` | 必填，目标 Wiki 目录 |
-| `--skill` | 必填，Skill 目录或 `SKILL.md` 的 Viking URI |
+| `--to` | 必填，Skill 模式的目标目录，或 session-to-memory 模式的 memory store 根目录 |
+| `--skill` | 可选；传入时是 Skill 目录或 `SKILL.md` URI，不传时进入 session-to-memory 模式 |
 | `--reason` | 可选，本次整理任务的描述 |
+| `--no-default-instruction` | 可选，仅用于 session-to-memory 模式；未传 `--reason` 时禁止注入默认附加抽取指令 |
 | `--wait` | 可选，等待任务完成 |
 | `--timeout` | 可选，仅与 `--wait` 一起使用；只限制 CLI 等待时间，不取消任务 |
 
@@ -56,11 +57,40 @@ ov compile \
 - `skill` 必须解析为 Skill root，目录 URI 和其 `SKILL.md` URI 视为同一个 Skill；
 - `from`、`to` 和 `skill` 的权限最终仍由 OpenViking Server 校验，CLI 不根据 URI 文本推断权限。
 
+session-to-memory 模式采用以下约束：
+
+- `--from` 包含一个或多个 session 根目录，以及恰好一个 memory store 根目录；
+- `--to` 必须是 user/peer 的 `memories` 根目录；
+- 输入 memory store 与 `--to` 必须相同，以支持原地 dream/reconcile 实验；
+- 所有 session 必须与目标 store 属于同一个 OpenViking 用户；
+- peer memory 模式下，所有 session 内的 user 消息必须使用目标 store 的 peer ID；
+- session 消息按 `--from` 顺序拼接，并只执行一次记忆抽取；
+- 只启用 `profile`、`preferences`、`entities`、`events` 四类普通记忆；
+- `--reason` 作为附加抽取 instruction，但不能覆盖 schema、权限、目标范围或 JSON 输出协议。
+
+```bash
+ov compile \
+  --from viking://user/default/sessions/locomo-batch-001 \
+  --from viking://user/default/sessions/locomo-batch-002 \
+  --from viking://user/default/peers/conv-26/memories \
+  --to viking://user/default/peers/conv-26/memories \
+  --reason "优先保留有明确对话证据的长期事实" \
+  --wait
+```
+
 `--reason` 为空时，VikingBot 使用以下默认任务描述：
 
 ```text
 Follow the loaded Skill's instructions to transform the provided source materials into the outputs required by the Skill.
 ```
+
+session-to-memory 模式使用独立的默认描述：
+
+```text
+Extract durable user memories from the provided sessions and reconcile them with the existing memory store.
+```
+
+传入 `--no-default-instruction` 且未传 `--reason` 时，不会添加上述默认描述。该选项只关闭 Compile 添加的附加指令，不影响记忆抽取器内置的 schema、system prompt 和访问控制。显式传入的 `--reason` 始终生效。
 
 ### 2.2 返回结果
 
@@ -183,8 +213,15 @@ POST /bot/v1/compile
 VikingBot 负责规范化参数并计算实际任务描述：
 
 ```python
-effective_reason = (request.reason or "").strip() or DEFAULT_COMPILE_REASON
+effective_reason = (request.reason or "").strip()
+if not effective_reason:
+    if request.skill is not None:
+        effective_reason = DEFAULT_COMPILE_REASON
+    elif not request.disable_default_instruction:
+        effective_reason = DEFAULT_MEMORY_COMPILE_REASON
 ```
+
+`disable_default_instruction` 仅在未指定 `skill` 时有效；它不会删除显式 `reason`。
 
 ### 4.2 查询任务
 
@@ -255,7 +292,7 @@ GET /bot/v1/compile/{task_id}
 
 VikingBot 创建异步任务后依次执行：
 
-1. 计算 `effective_reason`，并对 `from`、`to` 和 `skill` 做 URI 语法校验。
+1. 按 Skill/memory 模式计算 `effective_reason`，并对 `from`、`to` 和可选 `skill` 做 URI 语法校验。
 2. 通过 OpenViking 现有 `fs/attrs` 取得来源和目标的 canonical URI，再用 stat/list/read 路径验证形状与权限；Skill API 直接返回 canonical Skill root。VikingBot 后续只使用这些响应中的 canonical URI。
 3. 通过 Skills API 取得 Skill root、定义和文件清单，通过现有 content read/download 路径读取辅助文件，在 task workspace 中物化快照，并交给 `SkillsLoader` 加载。
 4. 为每个来源建立 `source_id + directory_uri + overview` 描述，并使用现有 list/tree 能力建立目标 Wiki 的有界轻量 catalog。

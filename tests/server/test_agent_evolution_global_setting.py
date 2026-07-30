@@ -284,3 +284,46 @@ async def test_manual_extract_respects_enabled_agent_evolution(
 
     assert response.status_code == 200, response.text
     assert extract.await_args.kwargs["agent_evolution_enabled"] is True
+
+
+async def test_manual_extract_applies_compile_memory_scope_and_instruction(
+    service,
+    client: httpx.AsyncClient,
+):
+    create_response = await client.post("/api/v1/sessions", json={})
+    session_id = create_response.json()["result"]["session_id"]
+    add_response = await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "role": "user",
+            "peer_id": "conv-26",
+            "content": "Caroline: I joined a support group.",
+        },
+    )
+    assert add_response.status_code == 200, add_response.text
+
+    extract = AsyncMock(return_value=[])
+    service.sessions._session_compressor.extract_long_term_memories = extract
+    response = await client.post(
+        f"/api/v1/sessions/{session_id}/extract",
+        json={
+            "memory_policy": {
+                "self": {"enabled": False},
+                "peer": {"enabled": True},
+                "memory_types": ["entities", "events", "preferences", "profile"],
+            },
+            "instruction": "Keep only durable facts.",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    kwargs = extract.await_args.kwargs
+    assert kwargs["allow_self_memory"] is False
+    assert kwargs["allowed_peer_ids"] == {"conv-26"}
+    assert kwargs["allowed_memory_types"] == {
+        "entities",
+        "events",
+        "preferences",
+        "profile",
+    }
+    assert kwargs["extraction_instruction"] == "Keep only durable facts."

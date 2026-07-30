@@ -1325,7 +1325,8 @@ ov session commit a1b2c3d4
 
 #### 1. API Implementation Introduction
 
-Trigger memory extraction immediately for an existing session without creating a new commit task.
+Trigger one memory extraction immediately from the ordered messages of one or more existing
+sessions without creating a new commit task.
 
 **Code Entries:**
 - `openviking/server/routers/sessions.py:extract_session()` - HTTP route
@@ -1337,6 +1338,9 @@ Trigger memory extraction immediately for an existing session without creating a
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | session_id | str | Yes | - | Session ID to extract memories from |
+| additional_session_ids | string[] | No | `[]` | Additional sessions appended in this order before the extractor runs once |
+| memory_policy | object | No | None | Optional self/peer and memory type scope for this extraction |
+| instruction | string | No | `""` | Optional additional extraction instruction; it cannot override schemas or access controls |
 
 #### 3. Usage Examples
 
@@ -1349,12 +1353,14 @@ POST /api/v1/sessions/{session_id}/extract
 ```bash
 curl -X POST http://localhost:1933/api/v1/sessions/a1b2c3d4/extract \
   -H "Content-Type: application/json" \
+  -d '{"additional_session_ids":["e5f6g7h8"],"memory_policy":{"self":{"enabled":false},"peer":{"enabled":true},"memory_types":["entities","events","preferences","profile"]}}' \
   -H "X-API-Key: your-key"
 ```
 
 **Response Example**
 
-The endpoint returns the extracted memory write results as a JSON list. The exact item shape depends on which memories were produced for that session.
+The endpoint concatenates the primary session and additional sessions in request order, invokes
+the extractor once, and returns the memory write results as a JSON list.
 
 <a id="get_task"></a><a id="list_tasks"></a>
 

@@ -14,6 +14,10 @@ DEFAULT_COMPILE_REASON = (
     "Follow the loaded Skill's instructions to transform the provided source materials "
     "into the outputs required by the Skill."
 )
+DEFAULT_MEMORY_COMPILE_REASON = (
+    "Extract durable user memories from the provided sessions and reconcile them with the "
+    "existing memory store."
+)
 COMPILE_STAGING_ROOT = "__compile_staging__"
 COMPILE_WIKI_PAGE_ROOT = f"{COMPILE_STAGING_ROOT}/wiki_pages"
 OKF_VERSION = "0.1"
@@ -37,9 +41,9 @@ class CompileLimits(BaseModel):
     output_pages: int = 64
     output_files: int = 64
     output_total_bytes: int = 4 * 1024 * 1024
-    concurrent_tasks: int = 2
+    concurrent_tasks: int = 10
     accepted_tasks: int = 16
-    accepted_tasks_per_principal: int = 4
+    accepted_tasks_per_principal: int = 10
     queue_wait_seconds: float = 5 * 60
     task_runtime_seconds: float = 30 * 60
     terminal_task_retention_seconds: float = 24 * 60 * 60
@@ -52,9 +56,16 @@ class CompileRequest(BaseModel):
     from_: list[str] = Field(alias="from", min_length=1)
     to: str = Field(min_length=1)
     reason: str | None = None
-    skill: str = Field(min_length=1)
+    skill: str | None = Field(default=None, min_length=1)
+    disable_default_instruction: bool = False
     openviking_connection: OpenVikingConnection | None = None
     _principal_scope: str = PrivateAttr(default="local")
+
+    @model_validator(mode="after")
+    def validate_instruction_mode(self) -> "CompileRequest":
+        if self.skill is not None and self.disable_default_instruction:
+            raise ValueError("disable_default_instruction is only supported without skill")
+        return self
 
 
 class SanitizedCompileRequest(BaseModel):
@@ -63,7 +74,7 @@ class SanitizedCompileRequest(BaseModel):
     from_: list[str] = Field(alias="from")
     to: str
     reason: str
-    skill: str
+    skill: str | None = None
 
 
 class WikiPageDraft(BaseModel):
@@ -177,7 +188,7 @@ class CompileResult(BaseModel):
 
     from_: list[str] = Field(alias="from")
     to: str
-    skill: str
+    skill: str | None = None
     okf_version: str = OKF_VERSION
     created: list[str] = Field(default_factory=list)
     updated: list[str] = Field(default_factory=list)
@@ -236,6 +247,7 @@ __all__ = [
     "CompileResult",
     "CompileTask",
     "DEFAULT_COMPILE_REASON",
+    "DEFAULT_MEMORY_COMPILE_REASON",
     "OKF_VERSION",
     "SanitizedCompileRequest",
     "TERMINAL_STATUSES",

@@ -9,6 +9,7 @@ Provides session management operations: session, sessions, add_message, commit, 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openviking.core.namespace import canonical_session_uri
+from openviking.core.peer_id import safe_peer_id
 from openviking.server.agent_evolution_config import AgentEvolutionConfigProvider
 from openviking.server.config import AgentEvolutionConfig, ToolOutputExternalizationConfig
 from openviking.server.identity import RequestContext
@@ -16,8 +17,8 @@ from openviking.service.task_tracker import get_task_tracker
 from openviking.session import Session
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry
 from openviking.session.memory_policy import MemoryPolicy
-from openviking.storage.vikingdb_manager import VikingDBManager
 from openviking.storage.viking_fs import VikingFS
+from openviking.storage.vikingdb_manager import VikingDBManager
 from openviking_cli.exceptions import (
     AlreadyExistsError,
     NotFoundError,
@@ -377,11 +378,21 @@ class SessionService:
         )
         return task.to_dict() if task else None
 
-    async def extract(self, session_id: str, ctx: RequestContext) -> List[Any]:
-        """Extract memories from a session.
+    async def extract(
+        self,
+        session_id: str,
+        ctx: RequestContext,
+        *,
+        memory_policy: Optional[Dict[str, Any]] = None,
+        extraction_instruction: str = "",
+        additional_session_ids: Optional[List[str]] = None,
+    ) -> List[Any]:
+        """Extract memories from one or more sessions in a single extraction.
 
         Args:
-            session_id: Session ID to extract from
+            session_id: Primary session ID to extract from.
+            additional_session_ids: Further sessions whose messages are appended
+                in the supplied order before the extractor runs.
 
         Returns:
             List of extracted memories
@@ -390,16 +401,39 @@ class SessionService:
         if not self._session_compressor:
             raise NotInitializedError("SessionCompressorV2")
 
-        session = await self.get(session_id, ctx)
-        archive_uri = f"{session.uri}/manual_extract"
+        session_ids = list(dict.fromkeys([session_id, *(additional_session_ids or [])]))
+        sessions = [await self.get(value, ctx) for value in session_ids]
+        messages = [message for session in sessions for message in session.messages]
+        archive_uri = f"{sessions[0].uri}/manual_extract"
 
-        memories = await self._session_compressor.extract_long_term_memories(
-            messages=session.messages,
-            user=ctx.user,
-            session_id=session_id,
-            ctx=ctx,
-            archive_uri=archive_uri,
-            agent_evolution_enabled=self.get_agent_evolution_enabled(),
-        )
+        extract_kwargs: Dict[str, Any] = {
+            "messages": messages,
+            "user": ctx.user,
+            "session_id": session_id,
+            "ctx": ctx,
+            "archive_uri": archive_uri,
+            "agent_evolution_enabled": self.get_agent_evolution_enabled(),
+        }
+        if memory_policy is not None:
+            policy = MemoryPolicy.from_dict(memory_policy)
+            policy.validate_memory_types(
+                set(MemoryTypeRegistry().list_names(include_disabled=False))
+            )
+            peer_ids = {
+                peer_id
+                for message in messages
+                if (peer_id := safe_peer_id(getattr(message, "peer_id", None)))
+            }
+            extract_kwargs.update(
+                {
+                    "allowed_memory_types": policy.memory_types,
+                    "allow_self_memory": policy.self_enabled,
+                    "allowed_peer_ids": peer_ids if policy.peer_enabled else set(),
+                }
+            )
+        if instruction := extraction_instruction.strip():
+            extract_kwargs["extraction_instruction"] = instruction
+
+        memories = await self._session_compressor.extract_long_term_memories(**extract_kwargs)
         self._record_lifecycle_metric("extract", "ok")
         return memories

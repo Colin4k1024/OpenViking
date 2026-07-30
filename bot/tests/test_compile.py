@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.agent.tools.base import Tool, ToolContext
@@ -12,6 +13,7 @@ from vikingbot.agent.tools.compile import CompileScopedTool, SubmitWikiBundleToo
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.compile.models import (
     DEFAULT_COMPILE_REASON,
+    DEFAULT_MEMORY_COMPILE_REASON,
     CompileFailure,
     CompileLimits,
     CompileRequest,
@@ -107,10 +109,26 @@ def test_compile_bundle_schema_distinguishes_wiki_pages_and_artifact_files():
 def test_compile_limit_defaults_match_the_resource_envelope():
     limits = CompileLimits()
 
-    assert limits.concurrent_tasks == 2
+    assert limits.concurrent_tasks == 10
+    assert limits.accepted_tasks_per_principal == 10
     assert limits.target_inventory_entries == 2000
     assert limits.target_catalog_pages == 10
     assert DirectBackendConfig().allow_compile_exec is False
+
+
+def test_compile_request_rejects_disabling_default_instruction_with_skill():
+    with pytest.raises(
+        ValueError,
+        match="disable_default_instruction is only supported without skill",
+    ):
+        CompileRequest.model_validate(
+            {
+                "from": ["viking://resources/source"],
+                "to": "viking://resources/wiki",
+                "skill": "viking://agent/skills/wiki",
+                "disable_default_instruction": True,
+            }
+        )
 
 
 def test_wiki_page_requires_exactly_one_body_source():
@@ -1344,6 +1362,368 @@ async def test_request_normalization_uses_default_reason_and_canonical_skill(mon
         )
     assert raised.value.code == "SKILL_INVALID"
     assert Client.created == set()
+
+
+@pytest.mark.parametrize(
+    ("reason", "disable_default_instruction", "expected_instruction"),
+    [
+        (None, False, DEFAULT_MEMORY_COMPILE_REASON),
+        (None, True, ""),
+        ("Keep durable facts.", False, "Keep durable facts."),
+        ("Keep durable facts.", True, "Keep durable facts."),
+    ],
+)
+@pytest.mark.asyncio
+async def test_skillless_compile_normalizes_session_and_same_peer_memory_store(
+    monkeypatch,
+    reason,
+    disable_default_instruction,
+    expected_instruction,
+):
+    session_uri = "viking://user/default/sessions/batch-1"
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+
+    class Client:
+        async def attrs(self, uri):
+            return {"uri": uri.rstrip("/")}
+
+        async def stat(self, uri):
+            return {"uri": uri, "isDir": True}
+
+        async def read_raw(self, uri):
+            assert uri == f"{session_uri}/messages.jsonl"
+            return "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "role": "user",
+                            "peer_id": "conv-26",
+                            "parts": [{"type": "text", "text": "Caroline: hello"}],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "role": "user",
+                            "peer_id": "conv-26",
+                            "parts": [{"type": "text", "text": "Melanie: hi"}],
+                        }
+                    ),
+                ]
+            )
+
+        async def close(self):
+            return None
+
+    async def create_client(**kwargs):
+        return Client()
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits()
+
+    request = CompileRequest.model_validate(
+        {
+            "from": [session_uri, memory_uri],
+            "to": memory_uri,
+            "reason": reason,
+            "disable_default_instruction": disable_default_instruction,
+        }
+    )
+    assert request.skill is None
+    assert request.disable_default_instruction is disable_default_instruction
+
+    normalized = await service._normalize_request(
+        request,
+        connection={"api_key": "secret"},
+    )
+
+    assert normalized.from_ == [session_uri, memory_uri]
+    assert normalized.to == memory_uri
+    assert normalized.skill is None
+    assert normalized.reason == expected_instruction
+
+
+@pytest.mark.asyncio
+async def test_skillless_compile_normalizes_multiple_sessions_in_source_order(monkeypatch):
+    session_uris = [
+        "viking://user/default/sessions/batch-1",
+        "viking://user/default/sessions/batch-2",
+    ]
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+
+    class Client:
+        async def attrs(self, uri):
+            return {"uri": uri.rstrip("/")}
+
+        async def stat(self, uri):
+            return {"uri": uri, "isDir": True}
+
+        async def read_raw(self, uri):
+            assert uri in {f"{session_uri}/messages.jsonl" for session_uri in session_uris}
+            return json.dumps({"role": "user", "peer_id": "conv-26"})
+
+        async def close(self):
+            return None
+
+    async def create_client(**kwargs):
+        return Client()
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits()
+
+    normalized = await service._normalize_request(
+        CompileRequest.model_validate(
+            {
+                "from": [session_uris[0], memory_uri, session_uris[1]],
+                "to": memory_uri,
+            }
+        ),
+        connection={"api_key": "secret"},
+    )
+
+    assert normalized.from_ == [*session_uris, memory_uri]
+
+
+@pytest.mark.asyncio
+async def test_skillless_compile_creates_empty_target_store_before_first_batch(monkeypatch):
+    session_uri = "viking://user/default/sessions/batch-1"
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+
+    class Client:
+        def __init__(self):
+            self.created = set()
+
+        async def attrs(self, uri):
+            if uri == memory_uri and uri not in self.created:
+                raise OpenVikingError("missing", code="NOT_FOUND")
+            return {"uri": uri.rstrip("/")}
+
+        async def stat(self, uri):
+            return {"uri": uri, "isDir": True}
+
+        async def mkdir(self, uri):
+            self.created.add(uri)
+
+        async def read_raw(self, uri):
+            assert uri == f"{session_uri}/messages.jsonl"
+            return json.dumps({"role": "user", "peer_id": "conv-26"})
+
+        async def close(self):
+            return None
+
+    client = Client()
+
+    async def create_client(**kwargs):
+        assert kwargs["timeout"] == CompileLimits().task_runtime_seconds
+        return client
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits()
+
+    normalized = await service._normalize_request(
+        CompileRequest.model_validate(
+            {
+                "from": [session_uri, memory_uri],
+                "to": memory_uri,
+            }
+        ),
+        connection={"api_key": "secret"},
+    )
+
+    assert client.created == {memory_uri}
+    assert normalized.to == memory_uri
+
+
+@pytest.mark.asyncio
+async def test_skillless_compile_rejects_session_peer_mismatch(monkeypatch):
+    session_uri = "viking://user/default/sessions/batch-1"
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+
+    class Client:
+        async def attrs(self, uri):
+            return {"uri": uri.rstrip("/")}
+
+        async def stat(self, uri):
+            return {"uri": uri, "isDir": True}
+
+        async def read_raw(self, uri):
+            return json.dumps({"role": "user", "peer_id": "conv-30"})
+
+        async def close(self):
+            return None
+
+    async def create_client(**kwargs):
+        return Client()
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits()
+
+    with pytest.raises(CompileFailure, match="target peer_id 'conv-26'"):
+        await service._normalize_request(
+            CompileRequest.model_validate(
+                {
+                    "from": [session_uri, memory_uri],
+                    "to": memory_uri,
+                }
+            ),
+            connection={"api_key": "secret"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_skillless_compile_runs_four_type_extractor_and_reports_changes(monkeypatch):
+    session_uris = [
+        "viking://user/default/sessions/batch-1",
+        "viking://user/default/sessions/batch-2",
+    ]
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+    existing_uri = f"{memory_uri}/profile.md"
+    created_uri = f"{memory_uri}/entities/caroline.md"
+
+    class Client:
+        def __init__(self):
+            self.tree_calls = 0
+
+        async def tree(self, uri, *, node_limit):
+            assert uri == memory_uri
+            self.tree_calls += 1
+            uris = [existing_uri] if self.tree_calls == 1 else [existing_uri, created_uri]
+            return [{"uri": value, "isDir": False} for value in uris]
+
+        async def extract_session(
+            self,
+            session_id,
+            *,
+            memory_policy,
+            instruction,
+            additional_session_ids,
+        ):
+            assert session_id == "batch-1"
+            assert additional_session_ids == ["batch-2"]
+            assert memory_policy == {
+                "self": {"enabled": False},
+                "peer": {"enabled": True},
+                "working_memory": {"enabled": False},
+                "memory_types": ["entities", "events", "preferences", "profile"],
+            }
+            assert instruction == "Keep durable facts."
+            return [{"uri": existing_uri}, {"uri": created_uri}]
+
+        async def close(self):
+            return None
+
+    class Store:
+        def __init__(self, task):
+            self.task = task
+
+        async def update(self, task_id, mutate):
+            assert task_id == self.task.task_id
+            mutate(self.task)
+            return self.task
+
+    client = Client()
+
+    async def create_client(**kwargs):
+        assert kwargs["timeout"] == CompileLimits().task_runtime_seconds
+        return client
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits()
+    request = SanitizedCompileRequest.model_validate(
+        {
+            "from": [*session_uris, memory_uri],
+            "to": memory_uri,
+            "reason": "Keep durable facts.",
+            "skill": None,
+        }
+    )
+    task = CompileTask(
+        task_id="cmp_memory",
+        principal_scope="owner",
+        sanitized_request=request,
+        status="accepted",
+        stage="queued",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    service.store = Store(task)
+
+    await service._execute_task(task.task_id, request, {"api_key": "secret"})
+
+    assert task.status == "completed"
+    assert task.result is not None
+    assert task.result.skill is None
+    assert task.result.created == [created_uri]
+    assert task.result.updated == [existing_uri]
+    assert task.result.page_count == 2
+
+
+@pytest.mark.asyncio
+async def test_skillless_compile_reports_openviking_timeout_as_deadline_exceeded(
+    monkeypatch,
+):
+    session_uri = "viking://user/default/sessions/batch-1"
+    memory_uri = "viking://user/default/peers/conv-26/memories"
+
+    class Client:
+        async def tree(self, uri, *, node_limit):
+            return []
+
+        async def extract_session(self, session_id, *, memory_policy, instruction):
+            raise httpx.ReadTimeout("extract request timed out")
+
+        async def close(self):
+            return None
+
+    class Store:
+        def __init__(self, task):
+            self.task = task
+
+        async def update(self, task_id, mutate):
+            mutate(self.task)
+            return self.task
+
+    async def create_client(**kwargs):
+        return Client()
+
+    monkeypatch.setattr("vikingbot.compile.service.VikingClient.create", create_client)
+    service = object.__new__(BotCompileService)
+    service.config = None
+    service.limits = CompileLimits(task_runtime_seconds=1200)
+    request = SanitizedCompileRequest.model_validate(
+        {
+            "from": [session_uri, memory_uri],
+            "to": memory_uri,
+            "reason": "",
+            "skill": None,
+        }
+    )
+    task = CompileTask(
+        task_id="cmp_memory_timeout",
+        principal_scope="owner",
+        sanitized_request=request,
+        status="accepted",
+        stage="queued",
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    service.store = Store(task)
+
+    with pytest.raises(CompileFailure) as raised:
+        await service._execute_task(task.task_id, request, {"api_key": "secret"})
+
+    assert raised.value.code == "DEADLINE_EXCEEDED"
+    assert raised.value.stage == "extracting_memories"
+    assert str(raised.value) == "OpenViking memory extraction timed out after 1200 seconds."
 
 
 def test_compile_target_accepts_only_exact_skill_namespaces():

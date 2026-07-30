@@ -93,6 +93,24 @@ async def test_search_omits_unset_optional_fields():
         assert dropped not in payload
 
 
+async def test_extract_session_sends_additional_session_ids():
+    client, fake = _client_with_fake()
+    fake.next_response = object()
+
+    await client.extract_session(
+        "session-1",
+        additional_session_ids=["session-2"],
+        instruction="Keep durable facts.",
+    )
+
+    call = fake.calls[-1]
+    assert call["path"] == "/api/v1/sessions/session-1/extract"
+    assert call["json"] == {
+        "additional_session_ids": ["session-2"],
+        "instruction": "Keep durable facts.",
+    }
+
+
 async def test_add_resource_omits_empty_args_and_null_fields():
     client, fake = _client_with_fake()
 

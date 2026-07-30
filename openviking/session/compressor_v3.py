@@ -158,6 +158,7 @@ class SessionCompressorV3:
         ctx: Optional[RequestContext] = None,
         messages: Optional[List] = None,
         latest_archive_overview: str = "",
+        extraction_instruction: str = "",
         isolation_handler: Optional[MemoryIsolationHandler] = None,
         transaction_handle=None,
     ) -> ExtractLoop:
@@ -167,6 +168,7 @@ class SessionCompressorV3:
         context_provider = SessionExtractContextProvider(
             messages=messages,
             latest_archive_overview=latest_archive_overview,
+            extraction_instruction=extraction_instruction,
             isolation_handler=isolation_handler,
             ctx=ctx,
             viking_fs=viking_fs,
@@ -301,6 +303,7 @@ class SessionCompressorV3:
         agent_evolution_enabled: bool = True,
         allow_self_memory: bool = True,
         allowed_peer_ids: Optional[set[str]] = None,
+        extraction_instruction: str = "",
     ):
         if not agent_evolution_enabled:
             effective_types = (
@@ -335,6 +338,7 @@ class SessionCompressorV3:
             allowed_memory_types=allowed_memory_types,
             allow_self_memory=allow_self_memory,
             allowed_peer_ids=allowed_peer_ids,
+            extraction_instruction=extraction_instruction,
         )
         agent_memory_types = _allowed_agent_memory_types(allowed_memory_types)
         cases_allowed = allowed_memory_types is None or _CASES_MEMORY_TYPE in allowed_memory_types
@@ -528,6 +532,7 @@ class SessionCompressorV3:
         allowed_memory_types: Optional[set[str]] = None,
         allow_self_memory: bool = True,
         allowed_peer_ids: Optional[set[str]] = None,
+        extraction_instruction: str = "",
     ) -> "_V3ExtractionResult":
         del user
         if not messages:
@@ -563,6 +568,7 @@ class SessionCompressorV3:
             ctx=ctx,
             messages=messages,
             latest_archive_overview=latest_archive_overview,
+            extraction_instruction=extraction_instruction,
             isolation_handler=isolation_handler,
             transaction_handle=None,
         )

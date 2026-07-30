@@ -870,7 +870,7 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     },
     CommandHelpSpec {
         path: &["compile"],
-        purpose: "Use a required VikingBot Skill to compile OpenViking materials into Wiki pages or a Skill package.",
+        purpose: "Compile materials with a VikingBot Skill, or omit --skill to extract a session into its memory store.",
         examples: &[
             HelpItem {
                 label: "ov compile --from viking://resources/weekly --to viking://resources/wiki --skill viking://agent/skills/monthly_wiki --wait",
@@ -879,6 +879,10 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
             HelpItem {
                 label: "ov compile --from viking://resources/weekly --to viking://agent/skills --skill viking://agent/skills/skill-creator --wait",
                 description: "Generate or update one shared Skill package.",
+            },
+            HelpItem {
+                label: "ov compile --from viking://user/default/sessions/batch-1 --from viking://user/default/peers/conv-26/memories --to viking://user/default/peers/conv-26/memories --no-default-instruction --wait",
+                description: "Extract four memory types in place without an additional default instruction.",
             },
         ],
         next_steps: &[HelpItem {

@@ -129,7 +129,8 @@ pub struct CompileResult {
     #[serde(rename = "from")]
     pub from_uris: Vec<String>,
     pub to: String,
-    pub skill: String,
+    #[serde(default)]
+    pub skill: Option<String>,
     pub okf_version: String,
     #[serde(default)]
     pub created: Vec<String>,
@@ -161,9 +162,16 @@ struct CompileCreateRequest<'a> {
     #[serde(rename = "from")]
     from_uris: &'a [String],
     to: &'a str,
-    skill: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_false")]
+    disable_default_instruction: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ============ HttpClient ============
@@ -334,14 +342,16 @@ impl HttpClient {
         &self,
         from_uris: &[String],
         to: &str,
-        skill: &str,
+        skill: Option<&str>,
         reason: Option<&str>,
+        disable_default_instruction: bool,
     ) -> Result<CompileAccepted> {
         let body = CompileCreateRequest {
             from_uris,
             to,
             skill,
             reason,
+            disable_default_instruction,
         };
         self.post("/bot/v1/compile", &body).await
     }
@@ -1813,7 +1823,7 @@ impl HttpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseClient, HttpClient, TimeoutConfig};
+    use super::{BaseClient, CompileCreateRequest, HttpClient, TimeoutConfig};
     use crate::base_client::api_error_from_envelope;
     use reqwest::StatusCode;
     use serde_json::json;
@@ -2162,12 +2172,41 @@ mod tests {
             .create_compile(
                 &["viking://resources/source".into()],
                 "viking://resources/wiki",
-                "viking://agent/skills/wiki",
+                Some("viking://agent/skills/wiki"),
                 None,
+                false,
             )
             .await
             .expect("202 response body should deserialize");
         assert_eq!(accepted.task_id, "cmp_1");
+    }
+
+    #[test]
+    fn compile_create_serializes_disable_default_instruction() {
+        let sources = vec![
+            "viking://user/default/sessions/batch-1".to_string(),
+            "viking://user/default/peers/conv-26/memories".to_string(),
+        ];
+        let body = CompileCreateRequest {
+            from_uris: &sources,
+            to: "viking://user/default/peers/conv-26/memories",
+            skill: None,
+            reason: None,
+            disable_default_instruction: true,
+        };
+
+        let value = serde_json::to_value(&body).expect("compile request should serialize");
+        assert_eq!(value["disable_default_instruction"], true);
+        assert!(value.get("skill").is_none());
+        assert!(value.get("reason").is_none());
+
+        let default_body = CompileCreateRequest {
+            disable_default_instruction: false,
+            ..body
+        };
+        let default_value =
+            serde_json::to_value(default_body).expect("default compile request should serialize");
+        assert!(default_value.get("disable_default_instruction").is_none());
     }
 
     #[tokio::test]

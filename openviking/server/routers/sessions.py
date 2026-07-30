@@ -131,6 +131,14 @@ class CreateSessionRequest(BaseModel):
     telemetry: TelemetryRequest = False
 
 
+class ExtractSessionRequest(BaseModel):
+    """Optional controls for an immediate memory extraction."""
+
+    memory_policy: Optional[Dict[str, Any]] = None
+    instruction: str = Field(default="", max_length=40_000)
+    additional_session_ids: List[str] = Field(default_factory=list, max_length=15)
+
+
 def _resolve_message_parts(msg_request: AddMessageRequest) -> List[Part]:
     """Resolve parts from an AddMessageRequest, handling path variables."""
     if msg_request.parts is not None:
@@ -478,11 +486,19 @@ async def commit_session(
 @router.post("/{session_id}/extract")
 async def extract_session(
     session_id: str = Path(..., description="Session ID"),
+    request: ExtractSessionRequest = Body(default_factory=ExtractSessionRequest),
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    """Extract memories from a session."""
+    """Extract memories once from one or more sessions."""
     service = get_service()
-    result = await service.sessions.extract(session_id, _ctx)
+    extract_kwargs: Dict[str, Any] = {}
+    if request.memory_policy is not None:
+        extract_kwargs["memory_policy"] = request.memory_policy
+    if request.instruction:
+        extract_kwargs["extraction_instruction"] = request.instruction
+    if request.additional_session_ids:
+        extract_kwargs["additional_session_ids"] = request.additional_session_ids
+    result = await service.sessions.extract(session_id, _ctx, **extract_kwargs)
     return Response(status="ok", result=_to_jsonable(result))
 
 

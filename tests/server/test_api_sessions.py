@@ -912,6 +912,43 @@ async def test_extract_session_jsonable_regression(client: httpx.AsyncClient, se
     assert body["result"] == [{"uri": "viking://user/memories/mock.md"}]
 
 
+async def test_extract_session_forwards_memory_policy_and_instruction(
+    client: httpx.AsyncClient,
+    service,
+    monkeypatch,
+):
+    captured = {}
+
+    async def fake_extract(_session_id: str, _ctx, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(service.sessions, "extract", fake_extract)
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+    policy = {
+        "self": {"enabled": False},
+        "peer": {"enabled": True},
+        "memory_types": ["entities", "events", "preferences", "profile"],
+    }
+
+    response = await client.post(
+        f"/api/v1/sessions/{session_id}/extract",
+        json={
+            "memory_policy": policy,
+            "instruction": "Prefer durable facts with explicit evidence.",
+            "additional_session_ids": ["session-2"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "memory_policy": policy,
+        "extraction_instruction": "Prefer durable facts with explicit evidence.",
+        "additional_session_ids": ["session-2"],
+    }
+
+
 async def test_get_session_context_endpoint_returns_trimmed_latest_archive_and_messages(
     client: httpx.AsyncClient,
     service,

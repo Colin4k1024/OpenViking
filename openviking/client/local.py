@@ -938,6 +938,23 @@ class LocalClient(BaseClient):
             execution.telemetry,
         )
 
+    async def extract_session(
+        self,
+        session_id: str,
+        *,
+        memory_policy: Optional[Dict[str, Any]] = None,
+        instruction: str = "",
+        additional_session_ids: Optional[List[str]] = None,
+    ) -> Any:
+        """Extract memories once from the ordered messages of one or more sessions."""
+        return await self._service.sessions.extract(
+            session_id,
+            self._ctx,
+            memory_policy=memory_policy,
+            extraction_instruction=instruction,
+            additional_session_ids=additional_session_ids,
+        )
+
     async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Query background task status."""
         return await self._service.sessions.get_commit_task(task_id, self._ctx)

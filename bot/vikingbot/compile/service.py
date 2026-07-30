@@ -14,9 +14,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
+import httpx
 from loguru import logger
 
-from openviking.core.namespace import classify_uri, uri_parts
+from openviking.core.namespace import classify_uri, is_session_uri, uri_parts
+from openviking.core.peer_id import safe_peer_id
 from openviking.core.skill_loader import SkillLoader
 from openviking.utils.path_safety import sanitize_relative_viking_path
 from openviking_cli.exceptions import OpenVikingError
@@ -28,6 +30,7 @@ from vikingbot.compile.models import (
     COMPILE_STAGING_ROOT,
     COMPILE_WIKI_PAGE_ROOT,
     DEFAULT_COMPILE_REASON,
+    DEFAULT_MEMORY_COMPILE_REASON,
     TERMINAL_STATUSES,
     CompileAccepted,
     CompileErrorInfo,
@@ -76,6 +79,7 @@ _CATALOG_FRONTMATTER_LINES = 128
 _TARGET_CATALOG_QUERY_CHARS = 40_000
 _REQUIREMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _WIKI_SEARCH_TAG = "ov.kind=wiki"
+_MEMORY_COMPILE_TYPES = frozenset({"entities", "events", "preferences", "profile"})
 _WORKSPACE_SUBMISSION_RULE_WITH_EXEC = (
     "Generate every artifact file in the task workspace with write_file or exec, then submit "
     "it through submit_wiki_bundle using workspace_path; never inline artifact content."
@@ -263,25 +267,26 @@ class BotCompileService:
                 "Compile source root limit exceeded.",
                 stage="queued",
             )
-        client = await VikingClient.create(connection=connection, config=self.config)
+        client = await VikingClient.create(
+            connection=connection,
+            timeout=self.limits.task_runtime_seconds,
+            config=self.config,
+        )
         try:
-            sources: list[str] = []
-            for raw_uri in raw_sources:
-                attrs = await client.attrs(raw_uri)
-                canonical = str(attrs.get("uri") or "").rstrip("/")
-                stat = await client.stat(canonical)
-                if not stat.get("isDir"):
-                    raise CompileFailure(
-                        "INVALID_ARGUMENT",
-                        f"Compile source must be a directory: {canonical}",
-                        stage="queued",
-                    )
-                if canonical not in sources:
-                    sources.append(canonical)
-            if len(sources) > self.limits.source_roots:
-                raise CompileFailure(
-                    "RESOURCE_EXHAUSTED", "Compile source root limit exceeded.", stage="queued"
+            if request.skill is None:
+                target = await self._normalize_target_directory(
+                    client,
+                    request.to,
+                    require_memory_root=True,
                 )
+                sources = await self._normalize_source_directories(client, raw_sources)
+                return await self._normalize_memory_request(
+                    client,
+                    sources,
+                    target=target,
+                    request=request,
+                )
+            sources = await self._normalize_source_directories(client, raw_sources)
 
             skill_uri = request.skill.strip().rstrip("/")
             if skill_uri.endswith("/SKILL.md"):
@@ -306,18 +311,7 @@ class BotCompileService:
             except ValueError as exc:
                 raise CompileFailure("SKILL_INVALID", str(exc), stage="queued") from exc
 
-            raw_target = request.to.strip().rstrip("/")
-            try:
-                target_attrs = await client.attrs(raw_target)
-            except OpenVikingError as exc:
-                if exc.code != "NOT_FOUND":
-                    raise
-                self._validate_target_directory(raw_target, {"isDir": True})
-                await client.mkdir(raw_target)
-                target_attrs = await client.attrs(raw_target)
-            target = str(target_attrs.get("uri") or "").rstrip("/")
-            target_stat = await client.stat(target)
-            self._validate_target_directory(target, target_stat)
+            target = await self._normalize_target_directory(client, request.to)
         except CompileFailure:
             raise
         except OpenVikingError as exc:
@@ -335,6 +329,224 @@ class BotCompileService:
                 "skill": canonical_skill,
             }
         )
+
+    async def _normalize_memory_request(
+        self,
+        client: VikingClient,
+        sources: list[str],
+        *,
+        target: str,
+        request: CompileRequest,
+    ) -> SanitizedCompileRequest:
+        target_peer_id, target_owner = self._memory_target_scope(target)
+        session_sources = [uri for uri in sources if is_session_uri(uri)]
+        memory_sources = [uri for uri in sources if classify_uri(uri).is_memory_root]
+        if (
+            not session_sources
+            or len(memory_sources) != 1
+            or len(sources) != len(session_sources) + 1
+        ):
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "Memory Compile requires one or more session roots and exactly one "
+                "memory-store root in --from.",
+                stage="queued",
+            )
+        if memory_sources[0] != target:
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "For the initial memory Compile mode, the --from memory store must equal --to.",
+                stage="queued",
+            )
+
+        for session_uri in session_sources:
+            _session_id, session_owner = self._session_id_and_owner(session_uri)
+            if target_owner and session_owner and target_owner != session_owner:
+                raise CompileFailure(
+                    "INVALID_ARGUMENT",
+                    "Every session and the target memory store must belong to the same "
+                    "OpenViking user.",
+                    stage="queued",
+                )
+            raw_messages = await client.read_raw(f"{session_uri}/messages.jsonl")
+            self._validate_memory_session_messages(
+                raw_messages,
+                target_peer_id=target_peer_id,
+                session_uri=session_uri,
+            )
+
+        reason = (request.reason or "").strip()
+        if not reason and not request.disable_default_instruction:
+            reason = DEFAULT_MEMORY_COMPILE_REASON
+
+        return SanitizedCompileRequest(
+            **{
+                "from": [*session_sources, target],
+                "to": target,
+                "reason": reason,
+                "skill": None,
+            }
+        )
+
+    async def _normalize_source_directories(
+        self,
+        client: VikingClient,
+        raw_sources: list[str],
+    ) -> list[str]:
+        sources: list[str] = []
+        for raw_uri in raw_sources:
+            attrs = await client.attrs(raw_uri)
+            canonical = str(attrs.get("uri") or "").rstrip("/")
+            stat = await client.stat(canonical)
+            if not stat.get("isDir"):
+                raise CompileFailure(
+                    "INVALID_ARGUMENT",
+                    f"Compile source must be a directory: {canonical}",
+                    stage="queued",
+                )
+            if canonical not in sources:
+                sources.append(canonical)
+        if len(sources) > self.limits.source_roots:
+            raise CompileFailure(
+                "RESOURCE_EXHAUSTED",
+                "Compile source root limit exceeded.",
+                stage="queued",
+            )
+        return sources
+
+    async def _normalize_target_directory(
+        self,
+        client: VikingClient,
+        raw_target: str,
+        *,
+        require_memory_root: bool = False,
+    ) -> str:
+        raw_target = raw_target.strip().rstrip("/")
+        try:
+            target_attrs = await client.attrs(raw_target)
+        except OpenVikingError as exc:
+            if exc.code != "NOT_FOUND":
+                raise
+            self._validate_target_directory(raw_target, {"isDir": True})
+            if require_memory_root:
+                self._memory_target_scope(raw_target)
+            await client.mkdir(raw_target)
+            target_attrs = await client.attrs(raw_target)
+        target = str(target_attrs.get("uri") or "").rstrip("/")
+        self._validate_target_directory(target, await client.stat(target))
+        return target
+
+    @staticmethod
+    def _memory_target_scope(target: str) -> tuple[str | None, str | None]:
+        classification = classify_uri(target)
+        parts = uri_parts(target)
+        if (
+            classification.scope != "user"
+            or not classification.is_memory_root
+            or classification.content_index is None
+        ):
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "Memory Compile target must be a user or peer memory-store root ending in "
+                "/memories.",
+                stage="queued",
+            )
+        prefix = parts[: classification.content_index]
+        peer_id = None
+        if len(prefix) >= 2 and prefix[-2] == "peers":
+            peer_id = safe_peer_id(prefix[-1])
+            if not peer_id:
+                raise CompileFailure(
+                    "INVALID_ARGUMENT",
+                    "Memory Compile target contains an invalid peer ID.",
+                    stage="queued",
+                )
+        elif "peers" in prefix:
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "Memory Compile target must identify exactly one peer memory store.",
+                stage="queued",
+            )
+
+        owner = None
+        if (
+            len(parts) >= 2
+            and parts[0] == "user"
+            and parts[1]
+            not in {
+                "memories",
+                "peers",
+            }
+        ):
+            owner = parts[1]
+        return peer_id, owner
+
+    @staticmethod
+    def _session_id_and_owner(session_uri: str) -> tuple[str, str | None]:
+        parts = uri_parts(session_uri)
+        try:
+            sessions_index = parts.index("sessions")
+        except ValueError as exc:
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                f"Compile session source must be a session root: {session_uri}",
+                stage="queued",
+            ) from exc
+        if len(parts) != sessions_index + 2:
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                f"Compile session source must identify exactly one session: {session_uri}",
+                stage="queued",
+            )
+        owner = None
+        if parts[0] == "user" and sessions_index == 2:
+            owner = parts[1]
+        return parts[-1], owner
+
+    @staticmethod
+    def _validate_memory_session_messages(
+        raw_messages: str,
+        *,
+        target_peer_id: str | None,
+        session_uri: str,
+    ) -> None:
+        messages: list[Mapping[str, Any]] = []
+        for line_number, line in enumerate(raw_messages.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CompileFailure(
+                    "INVALID_ARGUMENT",
+                    f"Invalid messages.jsonl in {session_uri} at line {line_number}.",
+                    stage="queued",
+                ) from exc
+            if isinstance(message, Mapping):
+                messages.append(message)
+        user_messages = [message for message in messages if message.get("role") == "user"]
+        if not user_messages:
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "Memory Compile session must contain at least one user message.",
+                stage="queued",
+            )
+        message_peer_ids = [safe_peer_id(message.get("peer_id")) for message in user_messages]
+        if target_peer_id is None:
+            if any(message_peer_ids):
+                raise CompileFailure(
+                    "INVALID_ARGUMENT",
+                    "Self-memory Compile requires user messages without peer_id.",
+                    stage="queued",
+                )
+            return
+        if any(peer_id != target_peer_id for peer_id in message_peer_ids):
+            raise CompileFailure(
+                "INVALID_ARGUMENT",
+                "Every user message in a peer-memory Compile session must use the target "
+                f"peer_id '{target_peer_id}'.",
+                stage="queued",
+            )
 
     @staticmethod
     def _validate_target_directory(target: str, stat: Mapping[str, Any]) -> None:
@@ -367,14 +579,9 @@ class BotCompileService:
                 stage="queued",
             )
         if classification.context_type == "memory":
-            if (
-                classification.content_index is None
-                or len(parts) <= classification.content_index + 1
-            ):
+            if classification.content_index is None:
                 raise CompileFailure(
-                    "INVALID_ARGUMENT",
-                    "Compile target must be inside a memory type directory",
-                    stage="queued",
+                    "INVALID_ARGUMENT", "Compile target must be a memory directory", stage="queued"
                 )
         elif parts == ["resources"] or (
             classification.content_index is not None
@@ -486,6 +693,9 @@ class BotCompileService:
         request: SanitizedCompileRequest,
         connection: dict[str, Any],
     ) -> None:
+        if request.skill is None:
+            await self._execute_memory_task(task_id, request, connection)
+            return
         capabilities = self._compile_capabilities()
         session_key = SessionKey(type="compile", channel_id=task_id, chat_id=task_id)
         task_config = self.config.model_copy(deep=True)
@@ -497,7 +707,11 @@ class BotCompileService:
         client: VikingClient | None = None
         try:
             await self._set_state(task_id, status="running", stage="loading_skill")
-            client = await VikingClient.create(connection=connection, config=self.config)
+            client = await VikingClient.create(
+                connection=connection,
+                timeout=self.limits.task_runtime_seconds,
+                config=self.config,
+            )
             skill_name, skill_target = self._skill_name_and_target(request.skill)
             skill_result = await client.get_skill(skill_name, target_uri=skill_target)
             try:
@@ -775,6 +989,143 @@ class BotCompileService:
             if client is not None:
                 await client.close()
             shutil.rmtree(workspace_parent, ignore_errors=True)
+
+    async def _execute_memory_task(
+        self,
+        task_id: str,
+        request: SanitizedCompileRequest,
+        connection: dict[str, Any],
+    ) -> None:
+        client: VikingClient | None = None
+        try:
+            await self._set_state(task_id, status="running", stage="collecting_context")
+            client = await VikingClient.create(
+                connection=connection,
+                timeout=self.limits.task_runtime_seconds,
+                config=self.config,
+            )
+            session_ids = [
+                self._session_id_and_owner(uri)[0] for uri in request.from_ if is_session_uri(uri)
+            ]
+            target_peer_id, _target_owner = self._memory_target_scope(request.to)
+            before_files = await self._memory_inventory(client, request.to)
+
+            memory_policy = {
+                "self": {"enabled": target_peer_id is None},
+                "peer": {"enabled": target_peer_id is not None},
+                "working_memory": {"enabled": False},
+                "memory_types": sorted(_MEMORY_COMPILE_TYPES),
+            }
+            await self._set_state(task_id, status="running", stage="extracting_memories")
+            extract_kwargs: dict[str, Any] = {
+                "memory_policy": memory_policy,
+                "instruction": request.reason,
+            }
+            if len(session_ids) > 1:
+                extract_kwargs["additional_session_ids"] = session_ids[1:]
+            extracted = await client.extract_session(session_ids[0], **extract_kwargs)
+            touched = self._memory_context_uris(extracted)
+
+            await self._set_state(task_id, status="committing", stage="refreshing")
+            after_files = await self._memory_inventory(
+                client,
+                request.to,
+                enforce_limit=False,
+            )
+            created = sorted(after_files - before_files)
+            updated = sorted(touched & before_files)
+            unchanged = sorted(touched - after_files)
+            warnings = []
+            if not created and not updated:
+                warnings.append(
+                    "The memory extractor produced no persisted changes for this session group."
+                )
+            if unchanged:
+                warnings.append(
+                    "Some extraction results were not present after refresh: "
+                    + ", ".join(unchanged[:10])
+                )
+            result = CompileResult(
+                **{
+                    "from": request.from_,
+                    "to": request.to,
+                    "skill": None,
+                    "created": created,
+                    "updated": updated,
+                    "unchanged": unchanged,
+                    "page_count": len(created) + len(updated),
+                    "link_count": 0,
+                    "warnings": warnings,
+                }
+            )
+
+            def complete(task: CompileTask) -> None:
+                task.status = "completed"
+                task.stage = "completed"
+                task.result = result
+                task.error = None
+
+            await self.store.update(task_id, complete)
+        except CompileFailure:
+            raise
+        except OpenVikingError as exc:
+            raise CompileFailure(exc.code, str(exc), stage="extracting_memories") from exc
+        except httpx.TimeoutException as exc:
+            raise CompileFailure(
+                "DEADLINE_EXCEEDED",
+                "OpenViking memory extraction timed out after "
+                f"{self.limits.task_runtime_seconds:g} seconds.",
+                stage="extracting_memories",
+            ) from exc
+        except Exception as exc:
+            raise CompileFailure(
+                "MEMORY_EXTRACTION_FAILED",
+                str(exc),
+                stage="extracting_memories",
+            ) from exc
+        finally:
+            if client is not None:
+                await client.close()
+
+    async def _memory_inventory(
+        self,
+        client: VikingClient,
+        target: str,
+        *,
+        enforce_limit: bool = True,
+    ) -> set[str]:
+        entries = await client.tree(
+            target,
+            node_limit=self.limits.target_inventory_entries + 1,
+        )
+        files = {
+            str(entry.get("uri") or "").rstrip("/")
+            for entry in entries
+            if isinstance(entry, Mapping)
+            and not entry.get("isDir")
+            and str(entry.get("uri") or "").rsplit("/", 1)[-1] not in _SKILL_EXCLUDED_FILES
+        }
+        if enforce_limit and len(files) > self.limits.target_inventory_entries:
+            raise CompileFailure(
+                "RESOURCE_EXHAUSTED",
+                "Target memory inventory limit exceeded",
+                stage="collecting_context",
+            )
+        return files
+
+    @staticmethod
+    def _memory_context_uris(extracted: Any) -> set[str]:
+        if isinstance(extracted, Mapping):
+            values = extracted.get("contexts", [])
+        else:
+            values = extracted
+        if not isinstance(values, list):
+            return set()
+        return {
+            str(item.get("uri") or "").rstrip("/")
+            for item in values
+            if isinstance(item, Mapping) and item.get("uri")
+        }
 
     @staticmethod
     async def _tag_wiki_files(

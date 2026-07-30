@@ -971,7 +971,7 @@ enum Commands {
         #[arg(long, help_heading = "Advanced options")]
         no_history: bool,
     },
-    /// [Interactive] Compile source materials with a VikingBot Skill
+    /// [Interactive] Compile source materials with a Skill or extract session memories
     Compile {
         /// Source directory; repeat the flag or separate directories with commas
         #[arg(
@@ -981,15 +981,18 @@ enum Commands {
             value_name = "uri"
         )]
         from_uris: Vec<String>,
-        /// Target Wiki directory or skills namespace
+        /// Target Wiki directory, memory-store root, or skills namespace
         #[arg(long, value_name = "uri")]
         to: String,
-        /// Skill directory or SKILL.md Viking URI
+        /// Skill directory or SKILL.md Viking URI; omit for session-to-memory extraction
         #[arg(long, value_name = "uri")]
-        skill: String,
+        skill: Option<String>,
         /// Description of this organization task
         #[arg(long, value_name = "text")]
         reason: Option<String>,
+        /// Do not add Compile's default memory extraction instruction
+        #[arg(long, conflicts_with = "skill")]
+        no_default_instruction: bool,
         /// Wait for the Compile task to finish
         #[arg(long)]
         wait: bool,
@@ -3179,6 +3182,7 @@ async fn main() {
             to,
             skill,
             reason,
+            no_default_instruction,
             wait,
             timeout,
         } => {
@@ -3189,6 +3193,7 @@ async fn main() {
                 to,
                 skill,
                 reason,
+                no_default_instruction,
                 wait,
                 timeout,
                 ctx.output_format,
@@ -3553,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_compile_requires_skill_and_expands_source_flags() {
+    fn cli_compile_supports_optional_skill_and_expands_source_flags() {
         let cli = Cli::try_parse_from([
             "ov",
             "compile",
@@ -3580,7 +3585,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(from_uris.len(), 3);
-                assert_eq!(skill, "viking://agent/skills/wiki");
+                assert_eq!(skill.as_deref(), Some("viking://agent/skills/wiki"));
                 assert!(reason.is_none());
                 assert!(wait);
                 assert_eq!(timeout, Some(10.0));
@@ -3588,6 +3593,29 @@ mod tests {
             _ => panic!("expected compile command"),
         }
 
+        let memory_cli = Cli::try_parse_from([
+            "ov",
+            "compile",
+            "--from",
+            "viking://user/default/sessions/batch-1",
+            "--from",
+            "viking://user/default/peers/conv-26/memories",
+            "--to",
+            "viking://user/default/peers/conv-26/memories",
+            "--no-default-instruction",
+        ])
+        .expect("compile without --skill should parse for memory mode");
+        match memory_cli.command {
+            Commands::Compile {
+                skill,
+                no_default_instruction,
+                ..
+            } => {
+                assert!(skill.is_none());
+                assert!(no_default_instruction);
+            }
+            _ => panic!("expected compile command"),
+        }
         assert!(
             Cli::try_parse_from([
                 "ov",
@@ -3596,6 +3624,9 @@ mod tests {
                 "viking://resources/a",
                 "--to",
                 "viking://resources/wiki",
+                "--skill",
+                "viking://agent/skills/wiki",
+                "--no-default-instruction",
             ])
             .is_err()
         );

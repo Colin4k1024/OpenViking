@@ -23,6 +23,10 @@ def _load_module(module_name: str, relative_path: str):
 IMPORT_TO_OV = _load_module(
     "test_import_to_ov_module", "benchmark/locomo/vikingbot/import_to_ov.py"
 )
+IMPORT_VIA_COMPILE = _load_module(
+    "test_import_via_compile_module",
+    "benchmark/locomo/vikingbot/import_via_compile.py",
+)
 RUN_EVAL = _load_module("test_run_eval_module", "benchmark/locomo/vikingbot/run_eval.py")
 
 
@@ -68,6 +72,51 @@ def test_build_session_messages_non_group_uses_sample_peer_and_prefixes_speaker(
     assert [msg["peer_id"] for msg in messages] == ["conv-26", "conv-26"]
     assert messages[0]["text"] == "Alice: Hi Bob"
     assert messages[1]["text"] == "Bob: Hello Alice"
+
+
+def test_compile_import_flattens_one_conversation_into_peer_scoped_messages():
+    messages = IMPORT_VIA_COMPILE.flatten_conversation(_sample_payload())
+
+    assert len(messages) == 2
+    assert [message["peer_id"] for message in messages] == ["conv-26", "conv-26"]
+    assert messages[0]["parts"][0]["text"] == "Alice: Hi Bob"
+    assert messages[1]["parts"][0]["text"] == "Bob: Hello Alice"
+    assert messages[0]["created_at"] < messages[1]["created_at"]
+
+
+def test_compile_import_command_uses_same_memory_input_and_output_without_skill():
+    session_uris = [
+        "viking://user/default/sessions/batch-1",
+        "viking://user/default/sessions/batch-2",
+    ]
+    command = IMPORT_VIA_COMPILE._compile_command(
+        ov_bin="ov",
+        session_uris=session_uris,
+        memory_uri="viking://user/default/peers/conv-26/memories",
+        reason="Keep durable facts.",
+        no_default_instruction=True,
+        timeout=3600,
+        account="default",
+        user="default",
+    )
+
+    assert command.count("--from") == 3
+    assert all(session_uri in command for session_uri in session_uris)
+    assert command[command.index("--to") + 1] == ("viking://user/default/peers/conv-26/memories")
+    assert command.count("viking://user/default/peers/conv-26/memories") == 2
+    assert "--skill" not in command
+    assert command[command.index("--reason") + 1] == "Keep durable facts."
+    assert "--no-default-instruction" in command
+
+
+def test_compile_import_accepts_configurable_sessions_per_compile(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["import_via_compile.py", "--sessions-per-compile", "3"],
+    )
+
+    assert IMPORT_VIA_COMPILE.parse_args().sessions_per_compile == 3
 
 
 @pytest.mark.asyncio

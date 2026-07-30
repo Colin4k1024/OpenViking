@@ -1299,7 +1299,7 @@ ov session commit a1b2c3d4
 
 #### 1. API 实现介绍
 
-立即对已有会话触发一次记忆提取，不会额外创建新的 commit 任务。
+将一个或多个已有会话的消息按顺序合并后立即触发一次记忆提取，不会额外创建新的 commit 任务。
 
 **代码入口**：
 - `openviking/server/routers/sessions.py:extract_session()` - HTTP 路由
@@ -1311,6 +1311,9 @@ ov session commit a1b2c3d4
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | session_id | str | 是 | - | 要提取记忆的会话 ID |
+| additional_session_ids | string[] | 否 | `[]` | 按给定顺序追加的其他会话；合并后只运行一次抽取器 |
+| memory_policy | object | 否 | None | 可选，限制本次抽取的 self/peer 范围和记忆类型 |
+| instruction | string | 否 | `""` | 可选的附加抽取指令；不能覆盖 schema 或访问控制 |
 
 #### 3. 使用示例
 
@@ -1323,12 +1326,13 @@ POST /api/v1/sessions/{session_id}/extract
 ```bash
 curl -X POST http://localhost:1933/api/v1/sessions/a1b2c3d4/extract \
   -H "Content-Type: application/json" \
+  -d '{"additional_session_ids":["e5f6g7h8"],"memory_policy":{"self":{"enabled":false},"peer":{"enabled":true},"memory_types":["entities","events","preferences","profile"]}}' \
   -H "X-API-Key: your-key"
 ```
 
 **响应示例**
 
-该接口会直接返回本次提取产生的记忆写入结果列表。列表项的具体结构取决于该会话实际提取出了哪些记忆。
+该接口会按请求顺序拼接主会话与其他会话，只调用一次抽取器，并直接返回本次提取产生的记忆写入结果列表。
 
 <a id="get_task"></a><a id="list_tasks"></a>
 
