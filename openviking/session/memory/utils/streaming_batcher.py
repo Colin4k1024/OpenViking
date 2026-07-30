@@ -89,6 +89,13 @@ class StreamingBatcher(Generic[T, R]):
         if self._closed:
             raise RuntimeError(f"{self.name} is closed")
 
+        payload_size = self._item_size(payload)
+        if payload_size > self.config.max_items_per_batch:
+            raise ValueError(
+                f"{self.name} item size {payload_size} exceeds hard batch limit "
+                f"{self.config.max_items_per_batch}"
+            )
+
         self._ensure_timer_task()
         loop = asyncio.get_running_loop()
         future: asyncio.Future[R] = loop.create_future()
@@ -123,33 +130,45 @@ class StreamingBatcher(Generic[T, R]):
                 items = self._buffer
                 self._buffer = []
 
-            batch_id = uuid.uuid4().hex
-            batch_trace_id = uuid.uuid4().hex
-            try:
-                with tracer.start_as_current_span(
-                    name=f"{self.name}.flush",
-                    trace_id=batch_trace_id,
-                ):
-                    tracer.set("batch_id", batch_id)
-                    tracer.set("flush_reason", reason)
-                    tracer.set("request_count", len(items))
-                    tracer.set("input_size", sum(self._item_size(item.payload) for item in items))
-                    result = await self.process_batch([item.payload for item in items], reason)
-                    metadata = self._get_result_metadata(result)
-                    if metadata is not None:
-                        metadata.setdefault("batch_id", batch_id)
-                        metadata.setdefault("batch_trace_id", batch_trace_id)
-            except Exception as exc:
-                for item in items:
-                    if not item.future.done():
-                        item.future.set_exception(exc)
-                raise
+            batches = self._partition_items(items)
+            last_result: R | None = None
+            for batch_index, batch_items in enumerate(batches):
+                batch_id = uuid.uuid4().hex
+                batch_trace_id = uuid.uuid4().hex
+                try:
+                    with tracer.start_as_current_span(
+                        name=f"{self.name}.flush",
+                        trace_id=batch_trace_id,
+                    ):
+                        tracer.set("batch_id", batch_id)
+                        tracer.set("flush_reason", reason)
+                        tracer.set("batch_index", batch_index)
+                        tracer.set("request_count", len(batch_items))
+                        tracer.set(
+                            "input_size",
+                            sum(self._item_size(item.payload) for item in batch_items),
+                        )
+                        result = await self.process_batch(
+                            [item.payload for item in batch_items],
+                            reason,
+                        )
+                        metadata = self._get_result_metadata(result)
+                        if metadata is not None:
+                            metadata.setdefault("batch_id", batch_id)
+                            metadata.setdefault("batch_trace_id", batch_trace_id)
+                except Exception as exc:
+                    for pending_batch in batches[batch_index:]:
+                        for item in pending_batch:
+                            if not item.future.done():
+                                item.future.set_exception(exc)
+                    raise
 
-            self._last_result = result
-            for item in items:
-                if not item.future.done():
-                    item.future.set_result(result)
-            return result
+                self._last_result = result
+                last_result = result
+                for item in batch_items:
+                    if not item.future.done():
+                        item.future.set_result(result)
+            return last_result
 
     def _ensure_timer_task(self) -> None:
         if self._timer_task is not None and not self._timer_task.done():
@@ -214,6 +233,32 @@ class StreamingBatcher(Generic[T, R]):
 
     def _buffered_size_unlocked(self) -> int:
         return sum(self._item_size(item.payload) for item in self._buffer)
+
+    def _partition_items(
+        self,
+        items: list[_PendingBatchItem[T, R]],
+    ) -> list[list[_PendingBatchItem[T, R]]]:
+        """Partition one flush snapshot without exceeding the configured hard limit."""
+
+        batches: list[list[_PendingBatchItem[T, R]]] = []
+        current: list[_PendingBatchItem[T, R]] = []
+        current_size = 0
+        limit = self.config.max_items_per_batch
+        for item in items:
+            item_size = self._item_size(item.payload)
+            if item_size > limit:
+                raise ValueError(
+                    f"{self.name} item size {item_size} exceeds hard batch limit {limit}"
+                )
+            if current and current_size + item_size > limit:
+                batches.append(current)
+                current = []
+                current_size = 0
+            current.append(item)
+            current_size += item_size
+        if current:
+            batches.append(current)
+        return batches
 
     def _item_size(self, payload: T) -> int:
         if self.item_size is None:

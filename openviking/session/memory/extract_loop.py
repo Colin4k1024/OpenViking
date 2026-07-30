@@ -507,10 +507,16 @@ OUTPUT_SCHEMA definition itself.
                         old_content = self.context_provider.read_file_contents.get(resolved_uri)
                         if old_content is not None:
                             resolved_op.old_memory_file_content = old_content
+                            if memory_type == "cases":
+                                proposed_identity = resolved_op.memory_fields.get("case_identity")
+                                if proposed_identity is not None:
+                                    resolved_op.memory_fields["_proposed_case_identity"] = (
+                                        proposed_identity
+                                    )
                             immutable_fields = {
                                 field.name
                                 for field in schema.fields
-                                if field.merge_op != MergeOp.PATCH
+                                if field.merge_op == MergeOp.IMMUTABLE
                             }
                             for field_name in immutable_fields:
                                 if field_name in old_content.extra_fields:

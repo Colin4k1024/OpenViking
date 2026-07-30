@@ -12,7 +12,6 @@ from openviking.server.identity import RequestContext, Role
 from openviking.server.routers.skills import (
     _list_skill_files,
     _list_skills_from_root,
-    _merge_skills,
     _require_skill,
     _restore_skill_privacy,
     _skill_summary_from_hit,
@@ -20,6 +19,7 @@ from openviking.server.routers.skills import (
 )
 from openviking.service import OpenVikingService
 from openviking.service.task_tracker import get_task_tracker
+from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.telemetry import TelemetryRequest
 from openviking.telemetry.execution import (
     attach_telemetry_payload,
@@ -290,11 +290,11 @@ class LocalClient(BaseClient):
     ) -> Dict[str, Any]:
         """Get a skill by name."""
         from openviking.server.routers.skills import (
+            SOURCE_METADATA_FILENAME,
             _parse_abstract_meta,
             _relative_skill_path,
             _skill_file_kind,
             _skill_summary_from_meta,
-            SOURCE_METADATA_FILENAME,
         )
         from openviking.server.skill_source_metadata import read_skill_source_metadata
 
@@ -476,7 +476,7 @@ class LocalClient(BaseClient):
         service = self._service
         ctx = self._ctx
         root_uri = await _require_skill(service, ctx, skill_name, target_uri)
-        result = await service.fs.rm(root_uri, ctx=ctx, recursive=True)
+        await service.fs.rm(root_uri, ctx=ctx, recursive=True)
         return {"name": skill_name, "uri": root_uri, "root_uri": root_uri, "deleted": True}
 
     async def validate_skill(
@@ -604,7 +604,8 @@ class LocalClient(BaseClient):
             offset: Starting line number (0-indexed). Default 0.
             limit: Number of lines to read. -1 means read to end. Default -1.
         """
-        return await self._service.fs.read(uri, ctx=self._ctx, offset=offset, limit=limit)
+        text = await self._service.fs.read(uri, ctx=self._ctx, offset=offset, limit=limit)
+        return MemoryFileUtils.read(text, uri=uri).content
 
     async def read_raw(self, uri: str, offset: int = 0, limit: int = -1) -> str:
         """Read raw file content, including hidden MEMORY_FIELDS metadata."""

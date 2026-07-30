@@ -23,9 +23,12 @@ from openviking.core.context import Context
 from openviking.message import Message
 from openviking.server.identity import RequestContext
 from openviking.session.memory import ExtractLoop, MemoryUpdater, StreamingMemoryUpdaterConfig
+from openviking.session.memory.case_aggregation import (
+    CaseIdentity,
+    case_generalization_post_validation,
+)
 from openviking.session.memory.dataclass import (
     MemoryFile,
-    MemoryOperationSource,
     ResolvedOperation,
     ResolvedOperations,
     StoredLink,
@@ -161,6 +164,7 @@ class SessionCompressorV3:
             ctx=ctx,
             context_provider=context_provider,
             isolation_handler=isolation_handler,
+            post_validation_hook=case_generalization_post_validation,
         )
 
     def _get_or_create_updater(self, registry, transaction_handle=None) -> MemoryUpdater:
@@ -348,8 +352,11 @@ class SessionCompressorV3:
             return {"contexts": [], "session_skills": []}
         case_write = await self._write_training_case_memory(
             case=case,
+            messages=_training_messages_after_case_spec(messages),
             ctx=ctx,
+            session_id=session_id,
             archive_uri=archive_uri,
+            strict_extract_errors=strict_extract_errors,
         )
         case_result = _applied_memory_result(case_write)
         contexts = _contexts_from_update_result(case_result)
@@ -382,8 +389,11 @@ class SessionCompressorV3:
         self,
         *,
         case: Case,
+        messages: list[Message],
         ctx: RequestContext,
+        session_id: Optional[str],
         archive_uri: str,
+        strict_extract_errors: bool,
     ) -> Any:
         viking_fs = get_viking_fs()
         registry = create_default_registry()
@@ -391,7 +401,7 @@ class SessionCompressorV3:
         if schema is None or not schema.enabled:
             raise RuntimeError("cases memory schema is not available")
 
-        extract_context = ExtractContext([])
+        extract_context = ExtractContext(messages)
         fields = _case_to_memory_fields(case)
         uri = generate_uri(
             memory_type=schema,
@@ -407,11 +417,6 @@ class SessionCompressorV3:
         except Exception:
             old_file = None
 
-        source = MemoryOperationSource(
-            extraction_id=(archive_uri.rstrip("/").rsplit("/", 1)[-1] if archive_uri else ""),
-            archive_uri=archive_uri or None,
-            trace_id=tracer.get_trace_id() or None,
-        )
         operations = ResolvedOperations(
             upsert_operations=[
                 ResolvedOperation(
@@ -419,23 +424,40 @@ class SessionCompressorV3:
                     memory_fields=fields,
                     memory_type=_CASES_MEMORY_TYPE,
                     uris=[uri],
-                    source=source,
                 )
             ],
             delete_file_contents=[],
             errors=[],
         )
-        updater = self._get_or_create_updater(registry, transaction_handle=None)
-        result = await updater.apply_operations(
-            operations,
-            ctx,
-            extract_context=extract_context,
-            isolation_handler=MemoryIsolationHandler(
-                ctx,
-                extract_context,
-                allowed_memory_types={_CASES_MEMORY_TYPE},
-            ),
+        extraction_id = uuid4().hex
+        extracted_at = datetime.now(timezone.utc).isoformat()
+        updater = await get_streaming_memory_updater(
+            key=make_streaming_memory_updater_key(request_context=ctx),
+            registry=registry,
+            vikingdb=self.vikingdb,
+            config=self.streaming_memory_updater_config,
         )
+        update_result = await updater.submit(
+            MemoryUpdateRequest(
+                operations=operations,
+                messages=list(messages),
+                ctx=ctx,
+                strict_extract_errors=strict_extract_errors,
+                isolation_options={
+                    "allowed_memory_types": {_CASES_MEMORY_TYPE},
+                    "allow_self": True,
+                },
+                metadata={
+                    "source_extraction_id": extraction_id,
+                    "session_id": session_id,
+                    "archive_uri": archive_uri or None,
+                    "trace_id": tracer.get_trace_id(),
+                    "extracted_at": extracted_at,
+                },
+            )
+        )
+        result = update_result.apply_result
+        operations = update_result.operations
         memory_diff = None
         if archive_uri:
             memory_diff = await self._build_memory_diff(
@@ -447,7 +469,8 @@ class SessionCompressorV3:
             )
         tracer.info(
             "Training CaseSpec fast path wrote case memory: "
-            f"case={case.name} uri={uri} written={result.written_uris} edited={result.edited_uris}"
+            f"case={case.name} target_uri={uri} "
+            f"written={result.written_uris} edited={result.edited_uris}"
         )
         return _V3AppliedMemory(result=result, operations=operations, memory_diff=memory_diff)
 
@@ -1146,10 +1169,27 @@ def _rubric_from_payload(raw_rubric: Any, *, fallback_name: str) -> Rubric:
 
 
 def _case_to_memory_fields(case: Case) -> dict[str, Any]:
+    input_payload = case.input or {}
+    identity = CaseIdentity(
+        goal=case.task_signature,
+        subject=str(
+            input_payload.get("summary") or input_payload.get("object_type") or case.task_signature
+        ),
+        action_pattern=case.task_signature,
+        success_boundary=f"Observable completion of: {case.task_signature}",
+        context_constraints=[
+            str(value)
+            for key, value in sorted(input_payload.items())
+            if key not in {"case_id", "id", "path", "date", "amount", "count"}
+            and value not in (None, "", [], {})
+        ][:5],
+        facets={},
+    )
     return {
         "case_name": case.name,
+        "case_identity": identity.compact_json(),
         "task_signature": case.task_signature,
-        "input": json.dumps(case.input or {}, ensure_ascii=False, sort_keys=True),
+        "input": json.dumps(input_payload, ensure_ascii=False, sort_keys=True),
         "rubric": json.dumps(
             _rubric_to_payload(case.rubric),
             ensure_ascii=False,

@@ -11,14 +11,38 @@ PatchMergeContextProvider, then applies the merged operations with MemoryUpdater
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Hashable
+from typing import Any, Hashable, Optional, Union
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from openviking.core.peer_id import safe_peer_id
 from openviking.message import Message
 from openviking.server.identity import RequestContext
+from openviking.session.memory.case_aggregation import (
+    CASE_DYNAMIC_FIELDS,
+    CASE_IDENTITY_FIELD,
+    CASE_MEMORY_TYPE,
+    CASE_PENDING_SOURCES_FIELD,
+    CASE_SOURCE_IDS_FIELD,
+    PROPOSED_CASE_IDENTITY_FIELD,
+    CaseIdentity,
+    CaseIdentityComparison,
+    case_identity_generalization_violations,
+    case_input_generalization_violations,
+    fallback_case_identity,
+    merged_case_pending_sources,
+    merged_case_source_state,
+    normalize_case_status,
+    parse_case_identity,
+    prepare_case_operation,
+    select_case_primary,
+    should_compact_case,
+)
 from openviking.session.memory.dataclass import (
     MemoryFile,
     MemoryOperationSource,
@@ -27,7 +51,6 @@ from openviking.session.memory.dataclass import (
     ResolvedOperations,
     StoredLink,
 )
-from openviking.session.memory.extract_loop import ExtractLoop
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.memory.memory_type_registry import (
     MemoryTypeRegistry,
@@ -42,11 +65,15 @@ from openviking.session.memory.memory_updater import (
     render_operation_after_file_content,
     write_stored_links,
 )
+from openviking.session.memory.merge_op import MergeOp, MergeOpFactory
+from openviking.session.memory.merge_op.base import get_python_type_for_field
 from openviking.session.memory.patch_merge_context_provider import (
     PatchMergeContextProvider,
     PatchMergePatch,
+    candidate_id_for_uri,
 )
 from openviking.session.memory.session_extract_context_provider import SessionExtractContextProvider
+from openviking.session.memory.utils.json_parser import parse_json_strict
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.memory.utils.streaming_batcher import (
     StreamingBatcher,
@@ -59,6 +86,22 @@ from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+
+class MemoryMergePlanError(ValueError):
+    """Raised when a merge plan is truncated, malformed, or incomplete."""
+
+
+class _MergePlanFieldOperationsBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _MergePlanGroupBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _MergePlanBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass(slots=True)
@@ -105,6 +148,21 @@ class MemoryUpdateRequest:
     strict_extract_errors: bool = False
     isolation_options: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class MemoryMergeProposal:
+    """One required patch proposal or optional stored candidate in a merge plan."""
+
+    proposal_id: str
+    patch: PatchMergePatch
+    operation: ResolvedOperation | None = None
+    delete_file: MemoryFile | None = None
+    is_candidate: bool = False
+
+    @property
+    def is_explicit_delete(self) -> bool:
+        return self.delete_file is not None
 
 
 @dataclass(slots=True)
@@ -220,9 +278,17 @@ class StreamingMemoryUpdater:
         grouped_requests = split_request_by_merge_group(request)
         if not grouped_requests:
             return None
+        bounded_group_requests = [
+            (group_key, chunk)
+            for group_key, group_request in grouped_requests
+            for chunk in split_memory_update_request_by_operation_limit(
+                group_request,
+                self._operation_limit_for_group(group_key),
+            )
+        ]
         submissions = [
             (await self._get_group_batcher(group_key)).submit(group_request)
-            for group_key, group_request in grouped_requests
+            for group_key, group_request in bounded_group_requests
         ]
         group_results = list(await asyncio.gather(*submissions))
         result = combine_streaming_memory_results(*group_results, fallback_request_count=1)
@@ -238,7 +304,11 @@ class StreamingMemoryUpdater:
         if not links:
             return
         links = remap_stored_links(
-            links, dict(getattr(result.operations, "delete_replacements", {}) or {})
+            links,
+            {
+                **dict(getattr(result.operations, "delete_replacements", {}) or {}),
+                **dict(getattr(result.operations, "link_replacements", {}) or {}),
+            },
         )
         valid_links = await filter_valid_links(
             links,
@@ -289,7 +359,7 @@ class StreamingMemoryUpdater:
             ),
             process_batch=process_batch,
             config=StreamingBatcherConfig(
-                max_items_per_batch=self.config.max_operations_per_update,
+                max_items_per_batch=self._operation_limit_for_group(group_key),
                 max_wait_seconds=self.config.max_wait_seconds,
                 timer_check_interval_seconds=self.config.timer_check_interval_seconds,
             ),
@@ -297,6 +367,13 @@ class StreamingMemoryUpdater:
             result_metadata=lambda result: result.metadata,
         )
         return batcher
+
+    def _operation_limit_for_group(self, group_key: MemoryMergeGroupKey) -> int:
+        if group_key.memory_type == CASE_MEMORY_TYPE:
+            # Apply Case proposals sequentially so every proposal compares
+            # against already-persisted candidates, never another in-flight proposal.
+            return 1
+        return self.config.max_operations_per_update
 
     def _split_append_only_request(
         self, request: MemoryUpdateRequest
@@ -466,6 +543,7 @@ class StreamingMemoryUpdater:
             errors=[],
             resolved_links=[],
             delete_replacements={},
+            link_replacements={},
         )
         for request in requests:
             ops = request.operations
@@ -474,6 +552,7 @@ class StreamingMemoryUpdater:
             all_ops.errors.extend(list(ops.errors or []))
             all_ops.resolved_links.extend(list(getattr(ops, "resolved_links", []) or []))
             all_ops.delete_replacements.update(dict(getattr(ops, "delete_replacements", {}) or {}))
+            all_ops.link_replacements.update(dict(getattr(ops, "link_replacements", {}) or {}))
         return await merge_memory_operations(
             operations=all_ops,
             messages=_combined_request_messages(requests),
@@ -565,6 +644,57 @@ def split_request_by_merge_group(
     return grouped_requests
 
 
+def split_memory_update_request_by_operation_limit(
+    request: MemoryUpdateRequest,
+    limit: int,
+) -> list[MemoryUpdateRequest]:
+    """Split one merge-group request so a single batch item never exceeds the hard limit."""
+
+    if limit <= 0:
+        raise ValueError("limit must be > 0")
+    operations = request.operations
+    ordered_items: list[tuple[str, ResolvedOperation | MemoryFile]] = [
+        ("upsert", op) for op in list(operations.upsert_operations or [])
+    ]
+    ordered_items.extend(
+        ("delete", memory_file) for memory_file in list(operations.delete_file_contents or [])
+    )
+    if len(ordered_items) <= limit:
+        return [request]
+
+    chunks: list[MemoryUpdateRequest] = []
+    for offset in range(0, len(ordered_items), limit):
+        chunk_items = ordered_items[offset : offset + limit]
+        upserts = [
+            item
+            for kind, item in chunk_items
+            if kind == "upsert" and isinstance(item, ResolvedOperation)
+        ]
+        deletes = [
+            item for kind, item in chunk_items if kind == "delete" and isinstance(item, MemoryFile)
+        ]
+        delete_uris = {memory_file.uri for memory_file in deletes if memory_file.uri}
+        chunks.append(
+            clone_memory_update_request(
+                request,
+                operations=ResolvedOperations(
+                    upsert_operations=upserts,
+                    delete_file_contents=deletes,
+                    errors=list(operations.errors or []),
+                    resolved_links=[],
+                    delete_replacements={
+                        deleted_uri: replacement_uri
+                        for deleted_uri, replacement_uri in dict(
+                            getattr(operations, "delete_replacements", {}) or {}
+                        ).items()
+                        if deleted_uri in delete_uris
+                    },
+                ),
+            )
+        )
+    return chunks
+
+
 def _merge_group_key_label(group_key: MemoryMergeGroupKey) -> str:
     peer_label = group_key.peer_id or "self"
     memory_type = group_key.memory_type or "unknown"
@@ -582,6 +712,7 @@ async def merge_memory_operations(
 ) -> ResolvedOperations:
     """Merge resolved memory operations by memory type/URI using patch context."""
 
+    del strict_extract_errors
     if operations.has_errors():
         tracer.info(
             "[streaming_memory_updater] merge skipped reason=operation_errors "
@@ -628,6 +759,7 @@ async def merge_memory_operations(
     merged_upserts = list(passthrough_upserts)
     merged_deletes: list[MemoryFile] = []
     merged_delete_replacements: dict[str, str] = {}
+    merged_link_replacements: dict[str, str] = {}
     merged_links = merge_link_lists(list(getattr(operations, "resolved_links", []) or []))
     registry = registry or create_default_registry()
     merge_results = await asyncio.gather(
@@ -643,61 +775,29 @@ async def merge_memory_operations(
                 trace_console=trace_console,
             )
             for (peer_id, memory_type) in all_group_keys
-        ],
-        return_exceptions=True,
+        ]
     )
 
-    for (peer_id, memory_type), group_key, merge_result in zip(
-        all_group_keys, all_group_keys, merge_results, strict=True
-    ):
+    for (peer_id, memory_type), merge_result in zip(all_group_keys, merge_results, strict=True):
+        group_key = (peer_id, memory_type)
         ops_list = upsert_groups.get(group_key, [])
-        if not isinstance(merge_result, Exception):
-            merged = merge_result
-            enforce_merge_group_peer_id(
-                merged.upsert_operations,
-                peer_id=peer_id,
-                memory_type=memory_type,
-                registry=registry,
-                ctx=ctx,
-            )
-            _inherit_source_metadata_to_merged_operations(ops_list, merged.upsert_operations)
-            merged_upserts.extend(merged.upsert_operations)
-            merged_deletes.extend(merged.delete_file_contents)
-            merged_delete_replacements.update(
-                dict(getattr(merged, "delete_replacements", {}) or {})
-            )
-            merged_links = merge_link_lists(
-                merged_links,
-                list(getattr(merged, "resolved_links", []) or []),
-            )
-            continue
-
-        peer_label = f"peer={peer_id}" if peer_id else "peer=self"
-        tracer.info(
-            "[streaming_memory_updater] merge fallback "
-            f"memory_type={memory_type} {peer_label} mode=fallback_original "
-            f"reason=llm_merge_failed patch_count={len(ops_list)} "
-            f"target_count={len(_unique_operation_uris(ops_list))} error={merge_result}",
-            console=trace_console,
+        merged = merge_result
+        enforce_merge_group_peer_id(
+            merged.upsert_operations,
+            peer_id=peer_id,
+            memory_type=memory_type,
+            registry=registry,
+            ctx=ctx,
         )
-        logger.warning(
-            "[streaming_memory_updater] merge failed for %s (%s): %s",
-            memory_type,
-            peer_label,
-            merge_result,
+        _inherit_source_metadata_to_merged_operations(ops_list, merged.upsert_operations)
+        merged_upserts.extend(merged.upsert_operations)
+        merged_deletes.extend(merged.delete_file_contents)
+        merged_delete_replacements.update(dict(getattr(merged, "delete_replacements", {}) or {}))
+        merged_link_replacements.update(dict(getattr(merged, "link_replacements", {}) or {}))
+        merged_links = merge_link_lists(
+            merged_links,
+            list(getattr(merged, "resolved_links", []) or []),
         )
-        if strict_extract_errors or is_cross_extraction_group(ops_list):
-            raise merge_result
-        # Fallback: keep original operations and delete files for this group
-        merged_upserts.extend(ops_list)
-        fallback_deletes = delete_groups.get(group_key, [])
-        merged_deletes.extend(fallback_deletes)
-        for delete_file in fallback_deletes:
-            replacement_uri = dict(getattr(operations, "delete_replacements", {}) or {}).get(
-                delete_file.uri
-            )
-            if replacement_uri:
-                merged_delete_replacements[delete_file.uri] = replacement_uri
 
     merged_links = await filter_valid_links(
         merged_links,
@@ -712,6 +812,7 @@ async def merge_memory_operations(
         errors=list(operations.errors),
         resolved_links=merged_links,
         delete_replacements=merged_delete_replacements,
+        link_replacements=merged_link_replacements,
     )
 
 
@@ -728,6 +829,8 @@ async def merge_one_memory_type_operations(
 ) -> ResolvedOperations:
     registry = registry or create_default_registry()
     schema = registry.get(memory_type)
+    if memory_type == CASE_MEMORY_TYPE:
+        operations = [prepare_case_operation(operation) for operation in operations]
     delete_files = list(delete_files or [])
     patch_count = len(operations)
     target_uris = _unique_operation_uris(operations)
@@ -808,6 +911,12 @@ async def merge_one_memory_type_operations(
         raise ValueError(f"Memory schema not found: {memory_type}")
 
     extract_context = ExtractContext(messages)
+    proposals = build_memory_merge_proposals(
+        operations=operations,
+        delete_files=delete_files,
+        schema=schema,
+        extract_context=extract_context,
+    )
     # Existing files: both upsert old_content and delete files count as "existing"
     required_file_uris = list(
         dict.fromkeys(
@@ -820,16 +929,10 @@ async def merge_one_memory_type_operations(
             + [df.uri for df in delete_files if df.uri]
         )
     )
-    patches = [
-        operation_to_patch(op, schema=schema, extract_context=extract_context) for op in operations
-    ] + [
-        memory_file_to_delete_patch(df, schema=schema, extract_context=extract_context)
-        for df in delete_files
-    ]
     provider = PatchMergeContextProvider(
         memory_type=memory_type,
         required_file_uris=required_file_uris,
-        patches=patches,
+        patches=[proposal.patch for proposal in proposals],
         output_language=merge_output_language_from_messages(messages),
     )
     provider._ctx = ctx
@@ -860,29 +963,188 @@ async def merge_one_memory_type_operations(
         if df.uri:
             provider.read_file_contents[df.uri] = df
     prefetch_messages = await provider.prefetch()
-
-    async def _prefetch():
-        return list(prefetch_messages)
-
-    provider.prefetch = _prefetch
+    candidate_files_by_id = provider.candidate_files_by_id
+    if memory_type == CASE_MEMORY_TYPE:
+        candidate_files_by_id = {
+            **build_case_target_candidate_files(operations),
+            **candidate_files_by_id,
+        }
+    candidate_proposals = build_candidate_merge_proposals(candidate_files_by_id)
+    all_proposals = {
+        proposal.proposal_id: proposal for proposal in [*proposals, *candidate_proposals]
+    }
+    plan_model = create_memory_merge_plan_model(schema)
+    plan_schema = json.dumps(plan_model.model_json_schema(), ensure_ascii=False)
     vlm = get_openviking_config().vlm.get_vlm_instance()
     tracer.info(
         "[streaming_memory_updater] llm merge input "
         f"memory_type={memory_type} required_file_count={len(required_file_uris)} "
-        f"required_files={required_file_uris} patch_count={len(patches)} "
+        f"required_files={required_file_uris} patch_count={len(proposals)} "
+        f"candidate_count={len(candidate_proposals)} "
         f"target_count={target_count}",
         console=trace_console,
     )
-    orchestrator = ExtractLoop(
-        vlm=vlm,
-        viking_fs=safe_get_viking_fs(),
-        ctx=ctx,
-        context_provider=provider,
-        isolation_handler=isolation_handler,
-        max_iterations=1,
+    merge_messages = [
+        {
+            "role": "system",
+            "content": (
+                f"{provider.instruction()}\n\n"
+                "The required final-output schema is named MERGE_PLAN. "
+                "Return an instance, not the schema definition.\n"
+                f"{plan_schema}"
+            ),
+        },
+        *prefetch_messages,
+    ]
+    response = await vlm.get_completion_async(
+        messages=merge_messages,
+        tools=None,
+        thinking=False,
     )
-    merged, _ = await orchestrator.run()
-    merged = merged or ResolvedOperations(upsert_operations=[], delete_file_contents=[], errors=[])
+    finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
+    if finish_reason in {"length", "max_tokens"} and memory_type == CASE_MEMORY_TYPE:
+        tracer.info(
+            "[streaming_memory_updater] retrying truncated Case merge with concise output",
+            console=trace_console,
+        )
+        response = await vlm.get_completion_async(
+            messages=[
+                *merge_messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "The previous MERGE_PLAN exceeded the output limit. Return the same "
+                        "required JSON schema much more concisely. Keep every required "
+                        "case_comparison, but do not explain labels. For a group that does not "
+                        "require full Case compaction, use an empty field_operations object. "
+                        "When compaction is required, keep each replacement field concise and "
+                        "use at most three observable rubric criteria. Output JSON only."
+                    ),
+                },
+            ],
+            tools=None,
+            thinking=False,
+        )
+        finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
+    if finish_reason in {"length", "max_tokens"}:
+        raise MemoryMergePlanError(f"LLM merge output truncated: finish_reason={finish_reason}")
+    def completion_content(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if getattr(value, "has_tool_calls", False):
+            raise MemoryMergePlanError("LLM merge returned tool calls")
+        return str(getattr(value, "content", "") or "")
+
+    def resolve_merge_plan(content: str) -> ResolvedOperations:
+        raw_plan, parse_error = parse_json_strict(content)
+        if parse_error is not None:
+            raise MemoryMergePlanError(parse_error)
+        if memory_type == CASE_MEMORY_TYPE:
+            raw_plan = sanitize_case_merge_plan_payload(raw_plan, schema=schema)
+        try:
+            plan = plan_model.model_validate(raw_plan, strict=True)
+        except ValidationError as exc:
+            raise MemoryMergePlanError(f"Invalid merge plan schema: {exc}") from exc
+        if memory_type == CASE_MEMORY_TYPE:
+            plan = normalize_case_merge_plan(
+                plan,
+                required_proposals=proposals,
+                all_proposals=all_proposals,
+            )
+            validate_case_merge_plan(
+                plan,
+                required_proposals=proposals,
+                all_proposals=all_proposals,
+            )
+        validate_memory_merge_plan(
+            plan,
+            required_proposals=proposals,
+            all_proposals=all_proposals,
+        )
+        merged = reconstruct_memory_operations_from_plan(
+            plan,
+            required_proposals=proposals,
+            all_proposals=all_proposals,
+            schema=schema,
+        )
+        if memory_type == CASE_MEMORY_TYPE:
+            merged = finalize_case_merge_operations(
+                merged,
+                plan=plan,
+                required_proposals=proposals,
+                all_proposals=all_proposals,
+            )
+        return merged
+
+    content = completion_content(response)
+    try:
+        merged = resolve_merge_plan(content)
+    except MemoryMergePlanError as exc:
+        retryable_case_errors = (
+            "Case groups do not match deterministic assignment:",
+            "Case compaction requires complete replacement fields:",
+            "Draft Case promotion requires generalized_case_identity",
+            "Draft Case promotion generalization failed:",
+        )
+        if memory_type != CASE_MEMORY_TYPE or not str(exc).startswith(retryable_case_errors):
+            raise
+        tracer.info(
+            "[streaming_memory_updater] retrying Case merge after semantic validation "
+            f"error={exc}",
+            console=trace_console,
+        )
+        correction_prompt = (
+            "The previous MERGE_PLAN failed server validation: "
+            f"{exc}. Return one corrected complete MERGE_PLAN JSON object. "
+            "Preserve valid case_comparisons and use the exact deterministic group "
+            "assignment stated by the server error. For every group that requires "
+            "compaction, replace task_signature, input, situation, rubric, and "
+            "evidence together. When promoting a draft, also provide a "
+            "generalized_case_identity derived from the semantic intersection of all "
+            "independent sources. Remove exact one-run values. Output JSON only."
+        )
+        response = await vlm.get_completion_async(
+            messages=[
+                *merge_messages,
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": correction_prompt},
+            ],
+            tools=None,
+            thinking=False,
+        )
+        retry_finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
+        if retry_finish_reason in {"length", "max_tokens"}:
+            tracer.info(
+                "[streaming_memory_updater] retrying truncated corrected Case merge "
+                "with ultra-concise output",
+                console=trace_console,
+            )
+            response = await vlm.get_completion_async(
+                messages=[
+                    *merge_messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{correction_prompt} The corrected output was truncated. Recreate it "
+                            "without quoting the previous output. Use no explanations. Limit "
+                            "task_signature to 40 words, situation to 45 words, evidence to 60 "
+                            "words, and each rubric criterion description to 20 words; use at "
+                            "most three rubric criteria. Keep compact JSON strings on one line."
+                        ),
+                    },
+                ],
+                tools=None,
+                thinking=False,
+            )
+            retry_finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
+        if retry_finish_reason in {"length", "max_tokens"}:
+            raise MemoryMergePlanError(
+                "LLM corrected Case merge output truncated after concise retry: "
+                f"finish_reason={retry_finish_reason}"
+            )
+        merged = resolve_merge_plan(completion_content(response))
     tracer.info(
         "[streaming_memory_updater] llm merge output "
         f"memory_type={memory_type} upserts={len(merged.upsert_operations)} "
@@ -890,6 +1152,782 @@ async def merge_one_memory_type_operations(
         console=trace_console,
     )
     return merged
+
+
+def build_memory_merge_proposals(
+    *,
+    operations: list[ResolvedOperation],
+    delete_files: list[MemoryFile],
+    schema: MemoryTypeSchema,
+    extract_context: ExtractContext,
+) -> list[MemoryMergeProposal]:
+    proposals: list[MemoryMergeProposal] = []
+    for index, operation in enumerate(operations):
+        proposal_id = _operation_proposal_id(operation, index)
+        patch = operation_to_patch(
+            operation,
+            schema=schema,
+            extract_context=extract_context,
+        )
+        patch.proposal_id = proposal_id
+        proposals.append(
+            MemoryMergeProposal(
+                proposal_id=proposal_id,
+                patch=patch,
+                operation=operation,
+            )
+        )
+    offset = len(operations)
+    for index, memory_file in enumerate(delete_files, start=offset):
+        proposal_id = _memory_file_proposal_id(memory_file, index)
+        patch = memory_file_to_delete_patch(
+            memory_file,
+            schema=schema,
+            extract_context=extract_context,
+        )
+        patch.proposal_id = proposal_id
+        proposals.append(
+            MemoryMergeProposal(
+                proposal_id=proposal_id,
+                patch=patch,
+                delete_file=memory_file,
+            )
+        )
+    proposal_ids = [proposal.proposal_id for proposal in proposals]
+    if len(set(proposal_ids)) != len(proposal_ids):
+        raise MemoryMergePlanError(f"Duplicate generated proposal_id: {proposal_ids}")
+    return proposals
+
+
+def build_candidate_merge_proposals(
+    candidate_files_by_id: dict[str, MemoryFile],
+) -> list[MemoryMergeProposal]:
+    return [
+        MemoryMergeProposal(
+            proposal_id=candidate_id,
+            patch=PatchMergePatch(
+                before_file=memory_file,
+                after_file=memory_file.model_copy(deep=True),
+                proposal_id=candidate_id,
+            ),
+            is_candidate=True,
+        )
+        for candidate_id, memory_file in candidate_files_by_id.items()
+    ]
+
+
+def build_case_target_candidate_files(
+    operations: list[ResolvedOperation],
+) -> dict[str, MemoryFile]:
+    """Expose directly targeted stored Cases as explicit identity candidates."""
+
+    result: dict[str, MemoryFile] = {}
+    for operation in operations:
+        old_file = operation.old_memory_file_content
+        if old_file is None or not old_file.uri:
+            continue
+        result[candidate_id_for_uri(old_file.uri)] = old_file
+    return result
+
+
+def create_memory_merge_plan_model(schema: MemoryTypeSchema) -> type[BaseModel]:
+    field_definitions: dict[str, tuple[Any, Any]] = {}
+    for memory_field in schema.fields:
+        if memory_field.merge_op == MergeOp.IMMUTABLE or memory_field.system_managed:
+            continue
+        base_type = get_python_type_for_field(memory_field.field_type)
+        patch_type = MergeOpFactory.from_field(memory_field).get_output_schema_type(
+            memory_field.field_type
+        )
+        output_type = Union[base_type, patch_type]
+        field_definitions[memory_field.name] = (
+            Optional[output_type],
+            Field(
+                default=None,
+                description=(
+                    f"Optional {memory_field.merge_op.value} payload for "
+                    f"{memory_field.name}: {memory_field.description}"
+                ),
+            ),
+        )
+
+    model_prefix = re.sub(r"[^A-Za-z0-9]+", "_", schema.memory_type).title()
+    field_operations_model = create_model(
+        f"{model_prefix}MergeFieldOperations",
+        __base__=_MergePlanFieldOperationsBase,
+        **field_definitions,
+    )
+    group_fields: dict[str, tuple[Any, Any]] = {
+        "proposal_ids": (
+            list[str],
+            Field(
+                ...,
+                min_length=1,
+                description=(
+                    "Input proposal_ids in this semantic group. Optional candidate_ids "
+                    "may also be included."
+                ),
+            ),
+        ),
+        "canonical_proposal_id": (
+            str,
+            Field(
+                ...,
+                description=(
+                    "Surviving proposal_id or candidate_id; it must also occur in proposal_ids."
+                ),
+            ),
+        ),
+        "field_operations": (
+            field_operations_model,
+            Field(...),
+        ),
+    }
+    if schema.memory_type == CASE_MEMORY_TYPE:
+        group_fields["generalized_case_identity"] = (
+            Optional[CaseIdentity],
+            Field(
+                default=None,
+                description=(
+                    "Replacement Case identity used only when a draft Case, either stored or "
+                    "formed in the current batch, is compacted from at least two independent "
+                    "sources and promoted. Derive the semantic intersection of the source "
+                    "identities, generalize one-run values into input.variable_types, and omit "
+                    "exact IDs, names, dates, amounts, percentages, counts, paths, and filenames."
+                ),
+            ),
+        )
+    group_model = create_model(
+        f"{model_prefix}MergePlanGroup",
+        __base__=_MergePlanGroupBase,
+        **group_fields,
+    )
+    plan_fields: dict[str, tuple[Any, Any]] = {
+        "groups": (list[group_model], Field(...)),
+        "delete_proposal_ids": (
+            list[str],
+            Field(
+                ...,
+                description="Explicit deletion proposal_ids that should remain deletes.",
+            ),
+        ),
+    }
+    if schema.memory_type == CASE_MEMORY_TYPE:
+        plan_fields["case_comparisons"] = (
+            list[CaseIdentityComparison],
+            Field(
+                ...,
+                description=(
+                    "Five-dimensional identity classifications for every current Case proposal "
+                    "against every listed candidate available to it."
+                ),
+            ),
+        )
+    return create_model(
+        f"{model_prefix}MergePlan",
+        __base__=_MergePlanBase,
+        **plan_fields,
+    )
+
+
+def sanitize_case_merge_plan_payload(
+    payload: Any,
+    *,
+    schema: MemoryTypeSchema,
+) -> Any:
+    """Remove model-authored Case fields that are not writable merge fields."""
+
+    if not isinstance(payload, dict):
+        return payload
+    allowed_fields = {
+        field.name
+        for field in schema.fields
+        if field.merge_op != MergeOp.IMMUTABLE and not field.system_managed
+    }
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        return payload
+    sanitized = dict(payload)
+    sanitized_groups: list[Any] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            sanitized_groups.append(group)
+            continue
+        proposal_ids = group.get("proposal_ids")
+        if isinstance(proposal_ids, list) and not proposal_ids:
+            continue
+        sanitized_group = dict(group)
+        field_operations = group.get("field_operations")
+        if isinstance(field_operations, dict):
+            sanitized_group["field_operations"] = {
+                name: value
+                for name, value in field_operations.items()
+                if name in allowed_fields
+            }
+        sanitized_groups.append(sanitized_group)
+    sanitized["groups"] = sanitized_groups
+    return sanitized
+
+
+def normalize_case_merge_plan(
+    plan: BaseModel,
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> BaseModel:
+    """Drop read-only groups and make canonical selection deterministic."""
+
+    required_ids = {
+        proposal.proposal_id for proposal in required_proposals if proposal.operation is not None
+    }
+    required_order = {
+        proposal.proposal_id: index
+        for index, proposal in enumerate(required_proposals)
+        if proposal.operation is not None
+    }
+    groups = list(getattr(plan, "groups", []) or [])
+    normalized_groups = [group for group in groups if required_ids & set(group.proposal_ids)]
+    canonicalized_groups = []
+    for group in normalized_groups:
+        member_ids = set(group.proposal_ids)
+        stored_candidates = sorted(
+            proposal_id
+            for proposal_id in member_ids
+            if proposal_id in all_proposals and all_proposals[proposal_id].is_candidate
+        )
+        required_members = sorted(
+            member_ids & required_ids,
+            key=lambda proposal_id: required_order[proposal_id],
+        )
+        canonical_id = (
+            stored_candidates[0]
+            if len(stored_candidates) == 1
+            else required_members[0]
+            if not stored_candidates and required_members
+            else group.canonical_proposal_id
+        )
+        canonicalized_groups.append(
+            group
+            if canonical_id == group.canonical_proposal_id
+            else group.model_copy(update={"canonical_proposal_id": canonical_id})
+        )
+    return plan.model_copy(update={"groups": canonicalized_groups})
+
+
+def validate_case_merge_plan(
+    plan: BaseModel,
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> None:
+    """Validate Case grouping against deterministic identity scoring."""
+
+    required_upserts = [
+        proposal for proposal in required_proposals if proposal.operation is not None
+    ]
+    candidate_ids = sorted(
+        proposal_id for proposal_id, proposal in all_proposals.items() if proposal.is_candidate
+    )
+    comparisons = list(getattr(plan, "case_comparisons", []) or [])
+    comparison_by_pair: dict[tuple[str, str], CaseIdentityComparison] = {}
+    expected_pairs: set[tuple[str, str]] = set()
+    previous_proposal_ids: list[str] = []
+
+    for proposal in required_upserts:
+        for candidate_id in [*candidate_ids, *previous_proposal_ids]:
+            if candidate_id == proposal.proposal_id:
+                continue
+            expected_pairs.add((proposal.proposal_id, candidate_id))
+        previous_proposal_ids.append(proposal.proposal_id)
+
+    for comparison in comparisons:
+        pair = (comparison.proposal_id, comparison.candidate_id)
+        reversed_pair = (comparison.candidate_id, comparison.proposal_id)
+        if pair not in expected_pairs and reversed_pair in expected_pairs:
+            pair = reversed_pair
+            comparison = comparison.model_copy(
+                update={
+                    "proposal_id": pair[0],
+                    "candidate_id": pair[1],
+                }
+            )
+        elif (
+            pair not in expected_pairs
+            and pair[0] in candidate_ids
+            and pair[1] in candidate_ids
+        ):
+            # Candidate files are read-only context. Models sometimes compare them
+            # with each other while reasoning about the best primary match; those
+            # comparisons do not affect assignment and are safe to ignore.
+            continue
+        if pair in comparison_by_pair:
+            raise MemoryMergePlanError(f"Duplicate Case comparison: {pair}")
+        comparison_by_pair[pair] = comparison
+    actual_pairs = set(comparison_by_pair)
+    if actual_pairs != expected_pairs:
+        missing = sorted(expected_pairs - actual_pairs)
+        extra = sorted(actual_pairs - expected_pairs)
+        raise MemoryMergePlanError(
+            f"Case comparison coverage mismatch: missing={missing} extra={extra}"
+        )
+
+    parent: dict[str, str] = {
+        proposal.proposal_id: proposal.proposal_id for proposal in required_upserts
+    }
+    selected_candidates: set[str] = set()
+
+    def find(item: str) -> str:
+        parent.setdefault(item, item)
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    previous_proposal_ids = []
+    for proposal in required_upserts:
+        eligible_comparisons = [
+            comparison_by_pair[(proposal.proposal_id, candidate_id)]
+            for candidate_id in [*candidate_ids, *previous_proposal_ids]
+            if (proposal.proposal_id, candidate_id) in comparison_by_pair
+        ]
+        primary_id, _ = select_case_primary(eligible_comparisons)
+        if primary_id:
+            union(proposal.proposal_id, primary_id)
+            if primary_id in candidate_ids:
+                selected_candidates.add(primary_id)
+        previous_proposal_ids.append(proposal.proposal_id)
+
+    components: dict[str, set[str]] = {}
+    for proposal in required_upserts:
+        components.setdefault(find(proposal.proposal_id), set()).add(proposal.proposal_id)
+    for candidate_id in selected_candidates:
+        components.setdefault(find(candidate_id), set()).add(candidate_id)
+
+    required_order = {
+        proposal.proposal_id: index for index, proposal in enumerate(required_upserts)
+    }
+    expected_groups: dict[frozenset[str], str] = {}
+    for member_ids in components.values():
+        stored_candidates = sorted(member_ids & set(candidate_ids))
+        if len(stored_candidates) > 1:
+            raise MemoryMergePlanError(
+                f"Case assignment selected multiple stored primaries: {stored_candidates}"
+            )
+        canonical_id = (
+            stored_candidates[0]
+            if stored_candidates
+            else min(member_ids, key=lambda item: required_order[item])
+        )
+        expected_groups[frozenset(member_ids)] = canonical_id
+
+    actual_groups = {
+        frozenset(group.proposal_ids): group.canonical_proposal_id
+        for group in list(getattr(plan, "groups", []) or [])
+    }
+    if actual_groups != expected_groups:
+        raise MemoryMergePlanError(
+            f"Case groups do not match deterministic assignment: "
+            f"expected={expected_groups} actual={actual_groups}"
+        )
+
+
+def validate_memory_merge_plan(
+    plan: BaseModel,
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> None:
+    required_by_id = {proposal.proposal_id: proposal for proposal in required_proposals}
+    required_ids = set(required_by_id)
+    known_ids = set(all_proposals)
+    counts: dict[str, int] = {}
+
+    groups = list(getattr(plan, "groups", []) or [])
+    if any(proposal.operation is not None for proposal in required_proposals) and not groups:
+        raise MemoryMergePlanError("Non-empty upsert input requires at least one merge group")
+
+    for group_index, group in enumerate(groups):
+        proposal_ids = list(group.proposal_ids)
+        if len(set(proposal_ids)) != len(proposal_ids):
+            raise MemoryMergePlanError(f"Merge group {group_index} contains duplicate proposal_ids")
+        unknown_ids = set(proposal_ids) - known_ids
+        if unknown_ids:
+            raise MemoryMergePlanError(
+                f"Merge group {group_index} contains unknown proposal_ids: {sorted(unknown_ids)}"
+            )
+        if group.canonical_proposal_id not in proposal_ids:
+            raise MemoryMergePlanError(
+                f"Merge group {group_index} canonical_proposal_id is not in proposal_ids"
+            )
+        canonical = all_proposals[group.canonical_proposal_id]
+        if canonical.is_explicit_delete:
+            raise MemoryMergePlanError(
+                f"Merge group {group_index} uses a deletion proposal as canonical"
+            )
+        if not (set(proposal_ids) & required_ids):
+            raise MemoryMergePlanError(
+                f"Merge group {group_index} does not contain an input proposal"
+            )
+        for proposal_id in proposal_ids:
+            counts[proposal_id] = counts.get(proposal_id, 0) + 1
+
+    delete_proposal_ids = list(getattr(plan, "delete_proposal_ids", []) or [])
+    if len(set(delete_proposal_ids)) != len(delete_proposal_ids):
+        raise MemoryMergePlanError("delete_proposal_ids contains duplicates")
+    for proposal_id in delete_proposal_ids:
+        proposal = required_by_id.get(proposal_id)
+        if proposal is None:
+            raise MemoryMergePlanError(
+                f"delete_proposal_ids contains unknown input proposal_id: {proposal_id}"
+            )
+        if not proposal.is_explicit_delete:
+            raise MemoryMergePlanError(
+                f"delete_proposal_ids contains non-deletion proposal_id: {proposal_id}"
+            )
+        counts[proposal_id] = counts.get(proposal_id, 0) + 1
+
+    missing = sorted(proposal_id for proposal_id in required_ids if counts.get(proposal_id) != 1)
+    if missing:
+        raise MemoryMergePlanError(
+            f"Every input proposal_id must appear exactly once; invalid ids: {missing}"
+        )
+    repeated_candidates = sorted(
+        proposal_id
+        for proposal_id, count in counts.items()
+        if proposal_id not in required_ids and count != 1
+    )
+    if repeated_candidates:
+        raise MemoryMergePlanError(f"Candidate ids may appear at most once: {repeated_candidates}")
+
+
+def finalize_case_merge_operations(
+    merged: ResolvedOperations,
+    *,
+    plan: BaseModel,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> ResolvedOperations:
+    """Apply Case source accounting, lifecycle state, and compaction policy."""
+
+    groups = list(getattr(plan, "groups", []) or [])
+    if len(groups) != len(merged.upsert_operations):
+        raise MemoryMergePlanError("Case merge output/group count mismatch")
+
+    for group, operation in zip(groups, merged.upsert_operations, strict=True):
+        canonical = all_proposals[group.canonical_proposal_id]
+        grouped = [all_proposals[proposal_id] for proposal_id in group.proposal_ids]
+        grouped_operations = [
+            proposal.operation for proposal in grouped if proposal.operation is not None
+        ]
+        existing_file = (
+            canonical.patch.before_file
+            if canonical.is_candidate
+            else canonical.operation.old_memory_file_content
+            if canonical.operation is not None
+            else None
+        )
+        target_candidate_id = (
+            candidate_id_for_uri(existing_file.uri)
+            if existing_file is not None and existing_file.uri
+            else None
+        )
+        split_from_target = (
+            existing_file is not None
+            and target_candidate_id is not None
+            and target_candidate_id not in set(group.proposal_ids)
+        )
+        if split_from_target:
+            original_uri = operation.uris[0] if operation.uris else None
+            _retarget_case_variant(operation, canonical.proposal_id)
+            if original_uri and operation.uris:
+                merged.link_replacements[original_uri] = operation.uris[0]
+            existing_file = None
+            operation.old_memory_file_content = None
+
+        source_ids, source_count = merged_case_source_state(
+            grouped_operations=grouped_operations,
+            existing_file=existing_file,
+        )
+        pending_sources = merged_case_pending_sources(
+            grouped_operations=grouped_operations,
+            existing_file=existing_file,
+        )
+        owned_source_ids = set(source_ids)
+        pending_sources = [
+            item
+            for item in pending_sources
+            if str(item.get("source_id") or "") in owned_source_ids
+        ]
+        existing_fields = dict(existing_file.extra_fields or {}) if existing_file else {}
+        last_compacted_source_count = int(existing_fields.get("last_compacted_source_count") or 0)
+        compact = should_compact_case(
+            source_count=source_count,
+            last_compacted_source_count=last_compacted_source_count,
+            existing_file=existing_file,
+        )
+        field_operations = set(group.field_operations.model_fields_set)
+        if compact:
+            missing_dynamic_fields = sorted(
+                field_name
+                for field_name in CASE_DYNAMIC_FIELDS
+                if field_name not in field_operations
+                or getattr(group.field_operations, field_name, None) is None
+            )
+            if missing_dynamic_fields:
+                raise MemoryMergePlanError(
+                    "Case compaction requires complete replacement fields: "
+                    f"{missing_dynamic_fields}"
+                )
+
+        fields = dict(operation.memory_fields or {})
+        existing_status = normalize_case_status(existing_fields.get("case_status"))
+        promoting_draft = compact and source_count >= 2 and existing_status == "draft"
+        generalized_identity = parse_case_identity(
+            getattr(group, "generalized_case_identity", None)
+        )
+        if promoting_draft:
+            if generalized_identity is None:
+                raise MemoryMergePlanError(
+                    "Draft Case promotion requires generalized_case_identity"
+                )
+            identity_violations = case_identity_generalization_violations(generalized_identity)
+            input_violations = case_input_generalization_violations(fields.get("input"))
+            if identity_violations or input_violations:
+                raise MemoryMergePlanError(
+                    "Draft Case promotion generalization failed: "
+                    + "; ".join([*identity_violations, *input_violations])
+                )
+            fields[CASE_IDENTITY_FIELD] = generalized_identity.compact_json()
+        elif existing_file is not None:
+            stored_identity = parse_case_identity(
+                existing_fields.get(CASE_IDENTITY_FIELD)
+            ) or fallback_case_identity(existing_fields)
+            fields[CASE_IDENTITY_FIELD] = stored_identity.compact_json()
+        else:
+            proposed_identity = (
+                parse_case_identity(fields.get(PROPOSED_CASE_IDENTITY_FIELD))
+                or parse_case_identity(fields.get(CASE_IDENTITY_FIELD))
+                or fallback_case_identity(fields)
+            )
+            fields[CASE_IDENTITY_FIELD] = proposed_identity.compact_json()
+
+        if existing_file is not None and not compact:
+            for field_name in CASE_DYNAMIC_FIELDS:
+                fields.pop(field_name, None)
+
+        fields.pop(PROPOSED_CASE_IDENTITY_FIELD, None)
+        if source_ids:
+            fields[CASE_SOURCE_IDS_FIELD] = source_ids
+        fields[CASE_PENDING_SOURCES_FIELD] = [] if compact else pending_sources
+        fields["source_count"] = source_count
+        fields["case_status"] = "promoted" if promoting_draft else existing_status
+        if compact:
+            fields["last_compacted_source_count"] = source_count
+            fields["last_compacted_version"] = int(existing_fields.get("version") or 0) + 1
+        else:
+            fields["last_compacted_source_count"] = last_compacted_source_count
+            fields["last_compacted_version"] = int(
+                existing_fields.get("last_compacted_version") or 0
+            )
+        operation.memory_fields = fields
+
+    return merged
+
+
+def _retarget_case_variant(operation: ResolvedOperation, proposal_id: str) -> None:
+    fields = dict(operation.memory_fields or {})
+    base_name = str(fields.get("case_name") or "case")
+    suffix = hashlib.sha256(proposal_id.encode("utf-8")).hexdigest()[:6]
+    variant_name = f"{base_name}_variant_{suffix}"
+    fields["case_name"] = variant_name
+    operation.memory_fields = fields
+    if operation.uris:
+        directory = operation.uris[0].rsplit("/", 1)[0]
+        operation.uris = [f"{directory}/{variant_name}.md"]
+
+
+def reconstruct_memory_operations_from_plan(
+    plan: BaseModel,
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+    schema: MemoryTypeSchema,
+) -> ResolvedOperations:
+    upserts: list[ResolvedOperation] = []
+    delete_by_uri: dict[str, MemoryFile] = {}
+    delete_replacements: dict[str, str] = {}
+    canonical_uris: set[str] = set()
+
+    for group in list(getattr(plan, "groups", []) or []):
+        canonical = all_proposals[group.canonical_proposal_id]
+        field_operations = {
+            field_name: getattr(group.field_operations, field_name)
+            for field_name in group.field_operations.model_fields_set
+        }
+        resolved_operation = _reconstruct_canonical_operation(
+            canonical=canonical,
+            grouped_proposals=[all_proposals[proposal_id] for proposal_id in group.proposal_ids],
+            field_operations=field_operations,
+            schema=schema,
+        )
+        canonical_uri = _first_uri(resolved_operation.uris)
+        if not canonical_uri:
+            raise MemoryMergePlanError(
+                f"Canonical proposal has no URI: {group.canonical_proposal_id}"
+            )
+        if canonical_uri in canonical_uris:
+            raise MemoryMergePlanError(f"Duplicate canonical URI in merge plan: {canonical_uri}")
+        canonical_uris.add(canonical_uri)
+        upserts.append(resolved_operation)
+
+        for proposal_id in group.proposal_ids:
+            if proposal_id == group.canonical_proposal_id:
+                continue
+            loser = all_proposals[proposal_id]
+            existing_file = loser.patch.before_file
+            loser_uri = existing_file.uri if existing_file is not None else None
+            if not loser_uri or loser_uri == canonical_uri:
+                continue
+            delete_by_uri[loser_uri] = existing_file
+            delete_replacements[loser_uri] = canonical_uri
+
+    required_by_id = {proposal.proposal_id: proposal for proposal in required_proposals}
+    for proposal_id in list(getattr(plan, "delete_proposal_ids", []) or []):
+        proposal = required_by_id[proposal_id]
+        if proposal.delete_file is None or not proposal.delete_file.uri:
+            raise MemoryMergePlanError(f"Deletion proposal has no existing file: {proposal_id}")
+        delete_by_uri[proposal.delete_file.uri] = proposal.delete_file
+
+    for canonical_uri in canonical_uris:
+        delete_by_uri.pop(canonical_uri, None)
+        delete_replacements.pop(canonical_uri, None)
+
+    return ResolvedOperations(
+        upsert_operations=upserts,
+        delete_file_contents=list(delete_by_uri.values()),
+        errors=[],
+        resolved_links=[],
+        delete_replacements=delete_replacements,
+    )
+
+
+def _reconstruct_canonical_operation(
+    *,
+    canonical: MemoryMergeProposal,
+    grouped_proposals: list[MemoryMergeProposal],
+    field_operations: dict[str, Any],
+    schema: MemoryTypeSchema,
+) -> ResolvedOperation:
+    base_file = canonical.patch.after_file.model_copy(deep=True)
+    final_fields = dict(base_file.extra_fields or {})
+    schema_by_name = {memory_field.name: memory_field for memory_field in schema.fields}
+    if "content" in schema_by_name:
+        final_fields["content"] = base_file.plain_content()
+
+    for field_name, patch_value in field_operations.items():
+        memory_field = schema_by_name.get(field_name)
+        if memory_field is None:
+            raise MemoryMergePlanError(f"Unknown field operation: {field_name}")
+        current_value = final_fields.get(field_name)
+        try:
+            final_fields[field_name] = MergeOpFactory.from_field(memory_field).apply(
+                current_value,
+                patch_value,
+            )
+        except Exception as exc:
+            raise MemoryMergePlanError(
+                f"Failed to apply merge_op for field {field_name}: {exc}"
+            ) from exc
+
+    old_file = (
+        canonical.patch.before_file
+        if canonical.patch.before_file is not None
+        else (base_file if canonical.is_candidate else None)
+    )
+    operation_fields: dict[str, Any] = {
+        key: value
+        for key, value in final_fields.items()
+        if key != "version" and key not in schema_by_name
+    }
+    for memory_field in schema.fields:
+        if memory_field.name not in final_fields:
+            continue
+        final_value = final_fields[memory_field.name]
+        current_value = _memory_file_field_value(old_file, memory_field.name)
+        if (
+            memory_field.merge_op == MergeOp.SUM
+            and current_value is not None
+            and final_value is not None
+        ):
+            try:
+                operation_fields[memory_field.name] = final_value - current_value
+            except TypeError as exc:
+                raise MemoryMergePlanError(
+                    f"Cannot reconstruct sum merge_op for field {memory_field.name}"
+                ) from exc
+        else:
+            operation_fields[memory_field.name] = final_value
+
+    source_ids = sorted(
+        {
+            source_id
+            for proposal in grouped_proposals
+            if proposal.operation is not None
+            for source_id in _operation_source_extraction_ids(proposal.operation)
+        }
+    )
+    operation_fields.pop("source_extraction_id", None)
+    operation_fields.pop("source_extraction_ids", None)
+    if len(source_ids) == 1:
+        operation_fields["source_extraction_id"] = source_ids[0]
+    elif source_ids:
+        operation_fields["source_extraction_ids"] = source_ids
+
+    source = canonical.operation.source if canonical.operation is not None else None
+    if source is None:
+        source = next(
+            (
+                proposal.operation.source
+                for proposal in grouped_proposals
+                if proposal.operation is not None and proposal.operation.source is not None
+            ),
+            None,
+        )
+    uri = base_file.uri or canonical.patch.target_uri
+    if not uri:
+        raise MemoryMergePlanError(f"Canonical proposal has no target URI: {canonical.proposal_id}")
+    return ResolvedOperation(
+        old_memory_file_content=old_file,
+        memory_fields=operation_fields,
+        memory_type=schema.memory_type,
+        uris=[uri],
+        source=source,
+    )
+
+
+def _memory_file_field_value(memory_file: MemoryFile | None, field_name: str) -> Any:
+    if memory_file is None:
+        return None
+    if field_name == "content":
+        return memory_file.plain_content()
+    return dict(memory_file.extra_fields or {}).get(field_name)
+
+
+def _operation_proposal_id(operation: ResolvedOperation, index: int) -> str:
+    source_id = source_extraction_id_for_operation(operation) or "batch"
+    return f"{source_id}:{index}"
+
+
+def _memory_file_proposal_id(memory_file: MemoryFile, index: int) -> str:
+    fields = dict(memory_file.extra_fields or {})
+    source_id = fields.get("source_extraction_id") or "batch"
+    return f"{source_id}:delete:{index}"
 
 
 def merge_output_language_from_messages(messages: list[Message]) -> str | None:
@@ -927,7 +1965,7 @@ def memory_file_to_delete_patch(
 
     The before_file is the original content; after_file is empty content,
     representing a deletion proposal. The merge LLM should put deleted files
-    in delete_ids.
+    in delete_proposal_ids.
     """
     after_file = MemoryFile(
         uri=mf.uri,
@@ -975,6 +2013,8 @@ def classify_memory_merge_mode(
 
     if operation_mode == "add_only":
         return True, "add_only"
+    if schema is not None and schema.memory_type == CASE_MEMORY_TYPE:
+        return False, "case_identity_assignment"
     if is_cross_extraction_group(operations):
         return False, "cross_extraction_batch"
     # Multi-patch batches always go through LLM merge even if all files are new and
@@ -1514,6 +2554,17 @@ def _scope_operations_to_submitter(
             ).items()
             if str(deleted_uri) in kept_uris or str(replacement_uri) in kept_uris
         },
+        link_replacements={
+            str(original_uri): str(replacement_uri)
+            for original_uri, replacement_uri in dict(
+                getattr(operations, "link_replacements", {}) or {}
+            ).items()
+            if (
+                str(original_uri) in kept_uris
+                or str(replacement_uri) in kept_uris
+                or str(original_uri) in request_uris
+            )
+        },
     )
 
 
@@ -1672,6 +2723,7 @@ def combine_streaming_memory_results(
         errors=[],
         resolved_links=[],
         delete_replacements={},
+        link_replacements={},
     )
     combined_apply_result = MemoryUpdateResult()
     metadata: dict[str, Any] = {
@@ -1694,6 +2746,9 @@ def combine_streaming_memory_results(
         )
         combined_operations.delete_replacements.update(
             dict(getattr(result.operations, "delete_replacements", {}) or {})
+        )
+        combined_operations.link_replacements.update(
+            dict(getattr(result.operations, "link_replacements", {}) or {})
         )
         combined_apply_result.written_uris.extend(result.apply_result.written_uris)
         combined_apply_result.edited_uris.extend(result.apply_result.edited_uris)

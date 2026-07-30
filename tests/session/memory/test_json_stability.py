@@ -15,11 +15,33 @@ from openviking.session.memory.utils import (
     _get_arg_type,
     _get_origin_type,
     extract_json_content,
+    parse_json_strict,
     parse_json_with_stability,
     parse_memory_file_with_fields,
     remove_json_trailing_content,
     value_fault_tolerance,
 )
+
+
+class TestParseJsonStrict:
+    def test_accepts_complete_json_only(self):
+        parsed, error = parse_json_strict('{"groups":[],"delete_proposal_ids":[]}')
+
+        assert error is None
+        assert parsed == {"groups": [], "delete_proposal_ids": []}
+
+    def test_rejects_truncated_json_without_repair(self):
+        parsed, error = parse_json_strict('{"groups":[{"proposal_ids":["p1"]')
+
+        assert parsed is None
+        assert error is not None
+        assert error.startswith("Invalid complete JSON:")
+
+    def test_rejects_markdown_wrapped_json(self):
+        parsed, error = parse_json_strict('```json\n{"groups":[]}\n```')
+
+        assert parsed is None
+        assert error is not None
 
 
 class TestExtractJsonContent:

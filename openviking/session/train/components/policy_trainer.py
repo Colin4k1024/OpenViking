@@ -189,7 +189,15 @@ class StreamingPolicyTrainer:
                 max_wait_seconds=self.config.max_wait_seconds,
                 timer_check_interval_seconds=self.config.timer_check_interval_seconds,
             ),
-            item_size=lambda item: len(item.gradients),
+            # One rollout can legitimately emit more gradients than one
+            # optimizer update.  The trainer splits those gradients by target
+            # inside ``_process_batch``; cap only the batcher's admission size
+            # so its generic oversized-item guard does not reject the rollout
+            # before that split can happen.
+            item_size=lambda item: min(
+                len(item.gradients),
+                self.config.max_gradients_per_update,
+            ),
             result_metadata=lambda result: result.metadata,
         )
         self._last_apply_result: PolicyApplyResult | None = None

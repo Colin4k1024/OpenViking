@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.session.memory.case_aggregation import CASE_PENDING_SOURCES_FIELD
 from openviking.session.memory.dataclass import MemoryFile, MemoryTypeSchema
 from openviking.session.memory.patch_merge_context_provider import (
     PatchMergeContextProvider,
@@ -185,6 +186,61 @@ async def test_patch_merge_context_provider_caps_extra_candidate_reads_at_ten():
 
 
 @pytest.mark.asyncio
+async def test_patch_merge_context_provider_caps_case_candidates_at_three():
+    schema = MemoryTypeSchema(
+        memory_type="cases",
+        description="Cases",
+        directory="viking://user/{{ user_space }}/memories/cases",
+        filename_template="{{ case_name }}.md",
+        fields=[],
+    )
+    required_uri = "viking://user/u/memories/cases/required.md"
+    provider = PatchMergeContextProvider(
+        memory_type="cases",
+        required_file_uris=[required_uri],
+        patches=[
+            PatchMergePatch(
+                before_file=None,
+                after_file=_memory_file(
+                    name="report",
+                    uri="viking://user/u/memories/cases/report.md",
+                    content="Reusable report task.",
+                    memory_type="cases",
+                ),
+            )
+        ],
+    )
+    provider._registry = SimpleNamespace(get=lambda name: schema if name == "cases" else None)
+    provider._ctx = SimpleNamespace(user=SimpleNamespace(user_id="u"))
+    provider.search_files = AsyncMock(
+        return_value=[
+            required_uri,
+            *[f"viking://user/u/memories/cases/candidate_{idx}.md" for idx in range(10)],
+        ]
+    )
+    provider.read_file = AsyncMock(
+        return_value={
+            "memory_type": "cases",
+            "case_name": "candidate",
+            "content": "candidate content",
+        }
+    )
+
+    await provider.prefetch()
+
+    _, search_kwargs = provider.search_files.await_args
+    assert search_kwargs["limit"] == 6
+    assert provider.read_file.await_count == 4
+    read_uris = [call.args[0] for call in provider.read_file.await_args_list]
+    assert read_uris == [
+        required_uri,
+        "viking://user/u/memories/cases/candidate_0.md",
+        "viking://user/u/memories/cases/candidate_1.md",
+        "viking://user/u/memories/cases/candidate_2.md",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_patch_merge_context_provider_renders_compact_patch_metadata():
     provider = PatchMergeContextProvider(
         memory_type="experiences",
@@ -309,6 +365,52 @@ async def test_patch_merge_context_provider_hides_feedback_stats_from_patch_diff
 
 
 @pytest.mark.asyncio
+async def test_patch_merge_context_provider_renders_case_pending_sources_once():
+    pending_source = {
+        "source_id": "session:new-3",
+        "identity": {
+            "goal": "complete report",
+            "subject": "report document",
+            "action_pattern": "prepare report",
+            "success_boundary": "report is usable",
+            "context_constraints": ["source data exists"],
+            "facets": {},
+        },
+        "task_signature": "prepare a reusable report",
+        "input": '{"preconditions":["source data exists"]}',
+        "situation": "A report is requested.",
+        "evidence": "The report workflow was executed.",
+    }
+    before = MemoryFile(
+        uri="viking://user/u/memories/cases/report.md",
+        content="same content",
+        memory_type="cases",
+        extra_fields={"case_name": "report"},
+    )
+    after = before.model_copy(deep=True)
+    after.extra_fields[CASE_PENDING_SOURCES_FIELD] = [pending_source]
+    provider = PatchMergeContextProvider(
+        memory_type="cases",
+        required_file_uris=[],
+        patches=[
+            PatchMergePatch(
+                before_file=before,
+                after_file=after,
+                proposal_id="new:0",
+            )
+        ],
+    )
+    provider.search_files = AsyncMock(return_value=[])
+
+    messages = await provider.prefetch()
+    content = messages[0]["content"]
+
+    assert content.count("# Pending Case Source Summaries") == 1
+    assert content.count('"source_id": "session:new-3"') == 1
+    assert "_case_pending_sources:" not in content
+
+
+@pytest.mark.asyncio
 async def test_patch_merge_context_provider_renders_create_patch_from_dev_null():
     provider = PatchMergeContextProvider(
         memory_type="experiences",
@@ -375,13 +477,15 @@ def test_patch_merge_context_provider_instruction_mentions_path_field_normalizat
     instruction = provider.instruction()
 
     assert "independent extraction patch proposals" in instruction
-    assert "merge duplicate/overlapping\nmemories into one canonical file patch" in instruction
+    assert "merge duplicate/overlapping\nmemories into one canonical group" in instruction
+    assert "Every\ninput proposal_id must appear exactly once" in instruction
+    assert "existing schema merge_op" in instruction
     assert "directory/filename fields" in instruction
     assert "schema identifiers" in instruction
     assert "book not books" in instruction
     assert "Chinese" in instruction
     assert "书籍 not 书/图书" in instruction
-    assert "put it in delete_ids" in instruction
+    assert "delete_proposal_ids only for explicit deletion proposals" in instruction
 
 
 def test_patch_merge_context_provider_detects_language_from_patch_content(monkeypatch):

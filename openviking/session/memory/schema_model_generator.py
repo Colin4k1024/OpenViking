@@ -13,7 +13,12 @@ from typing import Annotated, Any, Dict, List, Optional, Tuple, Type, Union
 from pydantic import BaseModel, Field, WithJsonSchema, create_model
 from pydantic.config import ConfigDict
 
-from openviking.session.memory.dataclass import DeleteId, FaultTolerantBaseModel, MemoryTypeSchema, WikiLink
+from openviking.session.memory.dataclass import (
+    DeleteId,
+    FaultTolerantBaseModel,
+    MemoryTypeSchema,
+    WikiLink,
+)
 from openviking.session.memory.memory_isolation_handler import RoleScope
 from openviking.session.memory.merge_op import MergeOp, MergeOpFactory
 from openviking.session.memory.merge_op.base import FieldType, get_python_type_for_field
@@ -127,6 +132,8 @@ class SchemaModelGenerator:
 
         # Add business fields from schema
         for field in memory_type.fields:
+            if field.system_managed:
+                continue
             base_type = self._map_field_type(field.field_type)
             if field.merge_op == MergeOp.IMMUTABLE:
                 # Immutable fields: only base type, required

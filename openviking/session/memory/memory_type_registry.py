@@ -237,6 +237,7 @@ class MemoryTypeRegistry:
                 description=field_data.get("description", ""),
                 merge_op=MergeOp(field_data.get("merge_op", "patch")),
                 init_value=field_data.get("init_value"),
+                system_managed=bool(field_data.get("system_managed", False)),
             )
             fields.append(field)
 

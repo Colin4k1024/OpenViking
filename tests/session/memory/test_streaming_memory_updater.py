@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from openviking.message import Message, TextPart
+from openviking.models.vlm.base import VLMResponse
 from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.dataclass import (
     MemoryField,
@@ -24,16 +28,24 @@ from openviking.session.memory.memory_updater import ExtractContext, MemoryUpdat
 from openviking.session.memory.merge_op.base import FieldType, MergeOp, SearchReplaceBlock, StrPatch
 from openviking.session.memory.streaming_memory_updater import (
     MemoryMergeGroupKey,
+    MemoryMergePlanError,
     MemoryUpdateRequest,
     StreamingMemoryUpdater,
     StreamingMemoryUpdaterConfig,
     StreamingMemoryUpdateResult,
+    build_candidate_merge_proposals,
+    build_memory_merge_proposals,
     classify_memory_merge_mode,
+    create_memory_merge_plan_model,
     enforce_merge_group_peer_id,
+    merge_memory_operations,
     merge_one_memory_type_operations,
     operation_to_patch,
+    reconstruct_memory_operations_from_plan,
     render_operation_after_file_content,
+    split_memory_update_request_by_operation_limit,
     split_request_by_merge_group,
+    validate_memory_merge_plan,
 )
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.storage.transaction.lock_handle import LockHandle
@@ -211,6 +223,78 @@ def _peer_note_op(name: str, peer_id: str) -> ResolvedOperation:
     op.memory_fields["peer_id"] = peer_id
     op.uris = [f"viking://user/u/peers/{peer_id}/memories/notes/{name}.md"]
     return op
+
+
+def test_streaming_memory_updater_serializes_case_batches():
+    updater = StreamingMemoryUpdater(
+        registry=_registry(),
+        config=StreamingMemoryUpdaterConfig(
+            max_operations_per_update=8,
+        ),
+    )
+
+    case_batcher = updater._create_group_batcher(
+        MemoryMergeGroupKey(peer_id=None, memory_type="cases")
+    )
+    note_batcher = updater._create_group_batcher(
+        MemoryMergeGroupKey(peer_id=None, memory_type="notes")
+    )
+
+    assert case_batcher.config.max_items_per_batch == 1
+    assert note_batcher.config.max_items_per_batch == 8
+
+
+def test_streaming_memory_updater_serial_case_limit_is_independent_of_global_limit():
+    updater = StreamingMemoryUpdater(
+        registry=_registry(),
+        config=StreamingMemoryUpdaterConfig(
+            max_operations_per_update=4,
+        ),
+    )
+
+    assert (
+        updater._operation_limit_for_group(
+            MemoryMergeGroupKey(peer_id=None, memory_type="cases")
+        )
+        == 1
+    )
+
+
+class _FakeMergeVLM:
+    def __init__(self, responder=None):
+        self.responder = responder
+        self.calls = []
+
+    async def get_completion_async(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.responder is not None:
+            return self.responder(kwargs["messages"])
+        content = "\n".join(str(message.get("content") or "") for message in kwargs["messages"])
+        proposal_ids = re.findall(r"proposal_id=([^\]\s]+)", content)
+        return json.dumps(
+            {
+                "groups": [
+                    {
+                        "proposal_ids": [proposal_id],
+                        "canonical_proposal_id": proposal_id,
+                        "field_operations": {},
+                    }
+                    for proposal_id in proposal_ids
+                ],
+                "delete_proposal_ids": [],
+            }
+        )
+
+
+def _install_fake_merge_vlm(monkeypatch, *, responder=None):
+    fake_vlm = _FakeMergeVLM(responder=responder)
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_openviking_config",
+        lambda: SimpleNamespace(
+            vlm=SimpleNamespace(get_vlm_instance=lambda: fake_vlm),
+        ),
+    )
+    return fake_vlm
 
 
 def test_operation_to_patch_omits_raw_operation_metadata():
@@ -469,6 +553,7 @@ async def test_streaming_memory_updater_batches_non_append_only_submits(monkeypa
         "openviking.session.memory.memory_updater.get_viking_fs",
         lambda: fs,
     )
+    _install_fake_merge_vlm(monkeypatch)
 
     updater = StreamingMemoryUpdater(
         registry=_registry(),
@@ -532,6 +617,10 @@ def test_scope_memory_update_result_to_submitter_filters_shared_batch_by_source(
             upsert_operations=[op_a, op_b],
             delete_file_contents=[],
             errors=[],
+            link_replacements={
+                "viking://user/u/memories/cases/old_a.md": op_a.uris[0],
+                "viking://user/u/memories/cases/old_b.md": op_b.uris[0],
+            },
         ),
         apply_result=apply_result,
         request_count=2,
@@ -555,6 +644,9 @@ def test_scope_memory_update_result_to_submitter_filters_shared_batch_by_source(
     assert scoped.metadata["scoped_to_source_extraction_id"] == "extract_a"
     assert scoped.apply_result.written_uris == [op_a.uris[0]]
     assert scoped.operations.upsert_operations == [op_a]
+    assert scoped.operations.link_replacements == {
+        "viking://user/u/memories/cases/old_a.md": op_a.uris[0]
+    }
     assert scoped.metadata["unscoped_written_uris"] == [op_a.uris[0], op_b.uris[0]]
 
 
@@ -621,6 +713,24 @@ def test_split_request_by_merge_group_infers_peer_from_uri_when_field_missing():
     assert [key for key, _ in grouped] == [
         MemoryMergeGroupKey(peer_id="conv-42", memory_type="notes")
     ]
+
+
+def test_split_memory_update_request_enforces_operation_hard_limit():
+    operations = [_note_op(f"note_{index}") for index in range(9)]
+    request = MemoryUpdateRequest(
+        operations=ResolvedOperations(
+            upsert_operations=operations,
+            delete_file_contents=[],
+            errors=[],
+        ),
+        messages=[],
+        ctx=_ctx(),
+    )
+
+    chunks = split_memory_update_request_by_operation_limit(request, 8)
+
+    assert [len(chunk.operations.upsert_operations) for chunk in chunks] == [8, 1]
+    assert [op for chunk in chunks for op in chunk.operations.upsert_operations] == operations
 
 
 def test_enforce_merge_group_peer_id_rewrites_merged_output_scope():
@@ -705,6 +815,7 @@ async def test_streaming_memory_updater_batches_per_merge_group(monkeypatch):
         "openviking.session.memory.memory_updater.get_viking_fs",
         lambda: fs,
     )
+    _install_fake_merge_vlm(monkeypatch)
 
     updater = StreamingMemoryUpdater(
         registry=_registry(),
@@ -995,7 +1106,7 @@ def test_render_operation_after_file_content_persists_source_trace_id():
 
 
 @pytest.mark.asyncio
-async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_delete(monkeypatch):
+async def test_cross_extraction_merge_deletes_existing_loser_from_validated_group(monkeypatch):
     existing_uri = "viking://user/u/memories/notes/existing.md"
     winner_uri = "viking://user/u/memories/notes/winner.md"
     old_file = __import__(
@@ -1027,19 +1138,20 @@ async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_de
         },
     )
 
-    async def fake_run(self):
-        return (
-            ResolvedOperations(
-                upsert_operations=[new_op],
-                delete_file_contents=[],
-                errors=[],
-            ),
-            [],
-        )
-
-    monkeypatch.setattr(
-        "openviking.session.memory.streaming_memory_updater.ExtractLoop.run",
-        fake_run,
+    _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: json.dumps(
+            {
+                "groups": [
+                    {
+                        "proposal_ids": ["extract_a:0", "extract_b:1"],
+                        "canonical_proposal_id": "extract_b:1",
+                        "field_operations": {},
+                    }
+                ],
+                "delete_proposal_ids": [],
+            }
+        ),
     )
     fs = InMemoryVikingFS({existing_uri: "old"})
     fs.search = AsyncMock(return_value=[])
@@ -1061,7 +1173,8 @@ async def test_cross_extraction_merge_preserves_existing_uri_without_explicit_de
     )
 
     assert [op.uris for op in merged.upsert_operations] == [[winner_uri]]
-    assert merged.delete_file_contents == []
+    assert [file.uri for file in merged.delete_file_contents] == [existing_uri]
+    assert merged.delete_replacements == {existing_uri: winner_uri}
 
 
 @pytest.mark.asyncio
@@ -1085,23 +1198,24 @@ async def test_patch_merge_uses_original_messages_for_output_language(monkeypatc
         memory_type="notes",
         uris=["viking://user/u/memories/notes/code_new.md"],
     )
-    captured_languages = []
+    captured_system_prompts = []
 
-    async def fake_run(self):
-        captured_languages.append(self.context_provider.get_output_language())
-        return (
-            ResolvedOperations(
-                upsert_operations=[existing_op],
-                delete_file_contents=[],
-                errors=[],
-            ),
-            [],
+    def respond(messages):
+        captured_system_prompts.append(messages[0]["content"])
+        return json.dumps(
+            {
+                "groups": [
+                    {
+                        "proposal_ids": ["batch:0", "batch:1"],
+                        "canonical_proposal_id": "batch:0",
+                        "field_operations": {},
+                    }
+                ],
+                "delete_proposal_ids": [],
+            }
         )
 
-    monkeypatch.setattr(
-        "openviking.session.memory.streaming_memory_updater.ExtractLoop.run",
-        fake_run,
-    )
+    _install_fake_merge_vlm(monkeypatch, responder=respond)
     fs = InMemoryVikingFS({existing_uri: "old"})
     fs.search = AsyncMock(return_value=[])
     monkeypatch.setattr(
@@ -1121,4 +1235,183 @@ async def test_patch_merge_uses_original_messages_for_output_language(monkeypatc
         registry=_registry(),
     )
 
-    assert captured_languages == ["zh-CN"]
+    assert len(captured_system_prompts) == 1
+    assert "All memory content must be written in zh-CN." in captured_system_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_reconstructs_canonical_with_existing_merge_op(monkeypatch):
+    _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: json.dumps(
+            {
+                "groups": [
+                    {
+                        "proposal_ids": ["batch:0", "batch:1"],
+                        "canonical_proposal_id": "batch:0",
+                        "field_operations": {"content": "merged content"},
+                    }
+                ],
+                "delete_proposal_ids": [],
+            }
+        ),
+    )
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    merged = await merge_one_memory_type_operations(
+        memory_type="notes",
+        operations=[_note_op("note_a"), _note_op("note_b")],
+        messages=[],
+        ctx=_ctx(),
+        registry=_registry(),
+    )
+
+    assert len(merged.upsert_operations) == 1
+    assert merged.upsert_operations[0].uris == ["viking://user/u/memories/notes/note_a.md"]
+    assert merged.upsert_operations[0].memory_fields["content"] == "merged content"
+
+
+def test_merge_plan_can_select_existing_candidate_as_canonical():
+    schema = _registry().get("notes")
+    proposals = build_memory_merge_proposals(
+        operations=[_note_op_with_source("new_note", "extract_1")],
+        delete_files=[],
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    candidate_uri = "viking://user/u/memories/notes/existing_note.md"
+    candidate_file = MemoryFile(
+        uri=candidate_uri,
+        content="existing content",
+        memory_type="notes",
+        extra_fields={"note_name": "existing_note"},
+    )
+    candidates = build_candidate_merge_proposals({"candidate:existing": candidate_file})
+    all_proposals = {proposal.proposal_id: proposal for proposal in [*proposals, *candidates]}
+    plan = create_memory_merge_plan_model(schema).model_validate(
+        {
+            "groups": [
+                {
+                    "proposal_ids": ["extract_1:0", "candidate:existing"],
+                    "canonical_proposal_id": "candidate:existing",
+                    "field_operations": {"content": "merged content"},
+                }
+            ],
+            "delete_proposal_ids": [],
+        },
+        strict=True,
+    )
+
+    validate_memory_merge_plan(
+        plan,
+        required_proposals=proposals,
+        all_proposals=all_proposals,
+    )
+    merged = reconstruct_memory_operations_from_plan(
+        plan,
+        required_proposals=proposals,
+        all_proposals=all_proposals,
+        schema=schema,
+    )
+
+    assert len(merged.upsert_operations) == 1
+    assert merged.upsert_operations[0].uris == [candidate_uri]
+    assert merged.upsert_operations[0].old_memory_file_content == candidate_file
+    assert merged.upsert_operations[0].memory_fields["content"] == "merged content"
+    assert merged.upsert_operations[0].memory_fields["source_extraction_id"] == "extract_1"
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_rejects_missing_proposal_without_raw_fallback(monkeypatch):
+    _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: json.dumps(
+            {
+                "groups": [
+                    {
+                        "proposal_ids": ["batch:0"],
+                        "canonical_proposal_id": "batch:0",
+                        "field_operations": {},
+                    }
+                ],
+                "delete_proposal_ids": [],
+            }
+        ),
+    )
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    with pytest.raises(MemoryMergePlanError, match="exactly once"):
+        await merge_one_memory_type_operations(
+            memory_type="notes",
+            operations=[_note_op("note_a"), _note_op("note_b")],
+            messages=[],
+            ctx=_ctx(),
+            registry=_registry(),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "error_pattern"),
+    [
+        ('{"groups":[', "Invalid complete JSON"),
+        (
+            VLMResponse(
+                content='{"groups":[],"delete_proposal_ids":[]}',
+                finish_reason="length",
+            ),
+            "output truncated",
+        ),
+    ],
+)
+async def test_patch_merge_rejects_truncated_output(monkeypatch, response, error_pattern):
+    _install_fake_merge_vlm(monkeypatch, responder=lambda messages: response)
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    with pytest.raises(MemoryMergePlanError, match=error_pattern):
+        await merge_one_memory_type_operations(
+            memory_type="notes",
+            operations=[_note_op("note_a"), _note_op("note_b")],
+            messages=[],
+            ctx=_ctx(),
+            registry=_registry(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_merge_memory_operations_propagates_merge_failure_without_fallback(monkeypatch):
+    async def fail_merge(**kwargs):
+        raise MemoryMergePlanError("merge failed")
+
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.merge_one_memory_type_operations",
+        fail_merge,
+    )
+
+    with pytest.raises(MemoryMergePlanError, match="merge failed"):
+        await merge_memory_operations(
+            operations=ResolvedOperations(
+                upsert_operations=[_note_op("note_a"), _note_op("note_b")],
+                delete_file_contents=[],
+                errors=[],
+            ),
+            messages=[],
+            ctx=_ctx(),
+            registry=_registry(),
+            strict_extract_errors=False,
+        )

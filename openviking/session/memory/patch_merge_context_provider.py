@@ -1,14 +1,16 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Context provider for merging structured memory-file patches via ExtractLoop."""
+"""Context provider for planning merges of structured memory-file patches."""
 
 from __future__ import annotations
 
 import difflib
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
 from openviking.server.identity import RequestContext
+from openviking.session.memory.case_aggregation import CASE_PENDING_SOURCES_FIELD
 from openviking.session.memory.dataclass import MemoryFile, MemoryTypeSchema
 from openviking.session.memory.session_extract_context_provider import (
     SessionExtractContextProvider,
@@ -20,8 +22,11 @@ _SYSTEM_HIDDEN_FIELDS = {
     "source_extraction_ids",
     "last_update_trace_id",
     "feedback_stats",
+    "_case_source_ids",
+    CASE_PENDING_SOURCES_FIELD,
 }
 _MAX_EXTRA_CANDIDATE_FILES = 10
+_MAX_CASE_EXTRA_CANDIDATE_FILES = 3
 _PATCH_METADATA_KEYS = ("confidence",)
 
 
@@ -32,6 +37,7 @@ class PatchMergePatch:
     before_file: MemoryFile | None
     after_file: MemoryFile
     metadata: dict[str, Any] = field(default_factory=dict)
+    proposal_id: str | None = None
 
     @property
     def target_uri(self) -> str | None:
@@ -108,7 +114,7 @@ def _string_values(value: Any) -> list[str]:
 
 
 class PatchMergeContextProvider(SessionExtractContextProvider):
-    """Provide original memory files and structured field diffs to ExtractLoop.
+    """Provide original memory files and structured field diffs to the merge planner.
 
     The provider is generic: callers decide which patches to pass in; this class
     only exposes original files as prefetched read results and memory-file field
@@ -128,6 +134,7 @@ class PatchMergeContextProvider(SessionExtractContextProvider):
         self.required_file_uris = list(required_file_uris or [])
         self.patches = list(patches)
         self._output_language = output_language or _resolve_patch_output_language(self.patches)
+        self._candidate_files_by_id: dict[str, MemoryFile] = {}
 
     def instruction(self) -> str:
         output_language = self._output_language
@@ -136,30 +143,91 @@ class PatchMergeContextProvider(SessionExtractContextProvider):
         structured_fields = ", ".join(f"`{name}`" for name in content_fields)
         experience_guidance = ""
         if self.memory_type == "experiences":
-            experience_guidance = """Preserve source-binding, applicability, scope ambiguity,
-canonical value/source-field rules, and anti-patterns from the strongest patches.
+            experience_guidance = """
+When merging `experiences`, every synthesized upsert must keep the skill-loader
+format: put the full runtime-facing Markdown in the `constraint` field, with
+exactly these top-level sections: `## Situation`, `## Reminder`, `## Procedure`,
+and `## Anti-pattern`. Do not output only a production reminder such as
+`# name` plus `## 规则`; convert that content into the four sections. Preserve
+source-binding, applicability, scope ambiguity, canonical value/source-field
+rules, and anti-patterns from the strongest patches.
 """
-        return f"""You are a memory patch merge agent.
+        case_instruction = ""
+        if self.memory_type == "cases":
+            case_instruction = """
+When merging `cases`, first classify each current proposal against every listed
+existing candidate and every earlier current proposal. For each pair, classify
+goal, subject, action_pattern, success_boundary, and context_constraints as one
+of MATCH, COMPATIBLE, UNKNOWN, or CONFLICT. Put every classification in
+case_comparisons. Goal, subject, and success_boundary are hard identity
+dimensions: UNKNOWN blocks automatic merge and CONFLICT requires a separate
+Case. The server computes the weighted score and validates the grouping; do not
+invent a numeric score.
 
-You are given original memory files and structured memory-file field diffs. Merge them by producing final memory operations that follow the provided JSON schema.
+Use exactly one primary Case for each current proposal. Keep ambiguous proposals
+as separate draft Cases and never update multiple candidates. For a group that
+requires full compaction, return complete replacement values for
+task_signature, input, situation, rubric, and evidence. Retain only stable
+cross-session task features. Exact one-run IDs, dates, amounts, counts, paths,
+and transient tool state belong to trajectories. The rubric field means
+internal observable success criteria inferred from the user task and execution
+evidence; never copy evaluator rubrics, weights, hidden answers, or benchmark
+criteria.
+
+The `Pending Case Source Summaries` section contains every independent source
+received since the previous compaction. Use all of them when rewriting the Case,
+but do not copy source_id or one-run details into the Case body.
+
+Compaction is semantic consensus, not content union. Keep the shared goal,
+subject, action pattern, completion boundary, and compatible stable
+preconditions. When sources use different concrete values for the same role,
+remove the values and record the role in input.variable_types. A fact supported
+only by one source must not become a stable Case constraint. Missing mention in
+a later source is not by itself a conflict with an already promoted consensus;
+explicit incompatible requirements are a conflict and require a separate Case.
+Never concatenate source descriptions, criteria, or evidence.
+
+For an ordinary accepted source update, use an empty field_operations object:
+the server will update only provenance, links, counters, and the pending-source
+buffer. Rewrite no body field partially. When the second independent source,
+the configured source delta, identity drift, content conflict, or body-length
+threshold requires full compaction, replace all five dynamic fields together:
+task_signature, input, situation, rubric, and evidence. When this first
+compaction promotes a draft Case, whether stored or formed in the current
+batch, also return generalized_case_identity. Derive it from the semantic
+intersection of every pending source, with no one-run values. Do not return
+generalized_case_identity for ordinary updates or use it to rewrite an already
+promoted Case.
+"""
+        return f"""You are a memory patch merge planner.
+
+You are given original memory files and structured memory-file field diffs. Return only a compact merge plan that follows the provided JSON schema. Do not repeat complete memory files.
 
 Do not call tools. Output JSON only.
 
 All memory content must be written in {output_language}.
 
 Reconcile independent extraction patch proposals: merge duplicate/overlapping
-memories into one canonical file patch, and keep distinct memories separate.
+memories into one canonical group, and keep distinct memories separate. Every
+input proposal_id must appear exactly once in either groups[].proposal_ids or
+delete_proposal_ids. A candidate_id may be included in at most one group when an
+existing stored memory should be the canonical item. canonical_proposal_id must
+also be present in that group's proposal_ids. Use field_operations only for
+fields that need synthesis; each field uses its existing schema merge_op.
 Normalize URI/path variants for directory/filename fields. Treat path segment
 fields as stable schema identifiers, not free-form labels. Reuse existing
 equivalent directories across singular/plural, synonym, or language/script
 variants. For new segments, use singular snake_case for English and one concise
 canonical term for Chinese; e.g. book not books, 书籍 not 书/图书. If a loser URI
-is an existing file, put it in delete_ids; if it is only a new proposal, omit it.
+is an existing file, the server will delete it after validating the group. Use
+delete_proposal_ids only for explicit deletion proposals that should remain deletes.
 
-Every upsert must preserve the `{self.memory_type}` schema's structured content fields:
-{structured_fields}. Put only content bodies in those fields; the storage template adds the
-Markdown structure.
+When synthesizing an upsert, preserve the `{self.memory_type}` schema's structured
+content fields: {structured_fields}. Put only content bodies in those fields; the
+storage template adds the Markdown structure. A provenance-only ordinary Case update
+may use the explicitly allowed empty field_operations described below.
 {experience_guidance}
+{case_instruction}
 """
 
     def get_tools(self) -> list[str]:
@@ -183,22 +251,56 @@ Markdown structure.
                 uri,
             )
 
+        self._candidate_files_by_id = self._build_candidate_files_by_id()
         messages.append(
             {
                 "role": "user",
                 "content": _render_field_diff_patches(
                     self.patches,
                     schema=self._get_registry().get(self.memory_type),
+                    candidate_files_by_id=self._candidate_files_by_id,
                 ),
             }
         )
         return messages
 
+    @property
+    def candidate_files_by_id(self) -> dict[str, MemoryFile]:
+        return dict(self._candidate_files_by_id)
+
+    def _build_candidate_files_by_id(self) -> dict[str, MemoryFile]:
+        if self.memory_type == "cases":
+            return {
+                candidate_id_for_uri(uri): memory_file
+                for uri, memory_file in sorted(self.read_file_contents.items())
+                if uri
+            }
+        patch_uris = {
+            uri
+            for patch in self.patches
+            for uri in (
+                patch.target_uri,
+                patch.before_file.uri if patch.before_file is not None else None,
+            )
+            if uri
+        }
+        return {
+            candidate_id_for_uri(uri): memory_file
+            for uri, memory_file in sorted(self.read_file_contents.items())
+            if uri and uri not in patch_uris
+        }
+
     async def _resolve_prefetch_file_uris(self) -> list[str]:
         """Resolve required files plus semantic-search candidates for this merge."""
 
         required_uris = _dedupe_uris(self.required_file_uris)
-        max_extra_candidate_files = min(_MAX_EXTRA_CANDIDATE_FILES, max(5, len(required_uris)))
+        if self.memory_type == "cases":
+            max_extra_candidate_files = _MAX_CASE_EXTRA_CANDIDATE_FILES
+        else:
+            max_extra_candidate_files = min(
+                _MAX_EXTRA_CANDIDATE_FILES,
+                max(5, len(required_uris)),
+            )
         search_limit = max_extra_candidate_files * 2
         candidate_uris = await self._search_candidate_file_uris(limit=search_limit)
         extra_uris: list[str] = []
@@ -247,6 +349,7 @@ def _render_field_diff_patches(
     patches: list[PatchMergePatch],
     *,
     schema: MemoryTypeSchema | None = None,
+    candidate_files_by_id: dict[str, MemoryFile] | None = None,
 ) -> str:
     if not patches:
         return "# Memory File Patches\n\nNo patches provided."
@@ -254,7 +357,50 @@ def _render_field_diff_patches(
         _render_one_field_diff_patch(index, patch, schema=schema)
         for index, patch in enumerate(patches, start=1)
     ]
-    return "# Memory File Patches\n\n" + "\n\n".join(rendered).rstrip()
+    content = "# Memory File Patches\n\n" + "\n\n".join(rendered).rstrip()
+    candidates = dict(candidate_files_by_id or {})
+    if candidates:
+        candidate_lines = [
+            f"- candidate_id={candidate_id} uri={memory_file.uri}"
+            for candidate_id, memory_file in candidates.items()
+        ]
+        content += "\n\n# Existing Candidate IDs\n\n" + "\n".join(candidate_lines)
+    pending_sources = _collect_case_pending_sources(patches, candidates)
+    if pending_sources:
+        content += "\n\n# Pending Case Source Summaries\n\n"
+        content += "\n".join(f"- {_compact_value(item)}" for item in pending_sources)
+    return content
+
+
+def _collect_case_pending_sources(
+    patches: list[PatchMergePatch],
+    candidate_files_by_id: dict[str, MemoryFile],
+) -> list[dict[str, Any]]:
+    if not any(patch.memory_type == "cases" for patch in patches):
+        return []
+    files = [
+        file
+        for patch in patches
+        for file in (patch.before_file, patch.after_file)
+        if file is not None
+    ]
+    files.extend(candidate_files_by_id.values())
+    result: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for file in files:
+        raw_sources = dict(file.extra_fields or {}).get(CASE_PENDING_SOURCES_FIELD)
+        if not isinstance(raw_sources, list):
+            continue
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("source_id") or "").strip()
+            if not source_id:
+                continue
+            if source_id not in result:
+                order.append(source_id)
+            result[source_id] = dict(item)
+    return [result[source_id] for source_id in order]
 
 
 def _render_one_field_diff_patch(
@@ -263,7 +409,8 @@ def _render_one_field_diff_patch(
     *,
     schema: MemoryTypeSchema | None = None,
 ) -> str:
-    lines = [f"Patch {index}"]
+    proposal_suffix = f" [proposal_id={patch.proposal_id}]" if patch.proposal_id else ""
+    lines = [f"Patch {index}{proposal_suffix}"]
     if patch.metadata:
         compact_metadata = _compact_patch_metadata(patch.metadata)
         if compact_metadata:
@@ -437,3 +584,8 @@ def _infer_user_space_from_uris(uris: list[str | None]) -> str | None:
         if user_space and user_space != "memories":
             return user_space
     return None
+
+
+def candidate_id_for_uri(uri: str) -> str:
+    digest = hashlib.sha256(uri.encode("utf-8")).hexdigest()[:12]
+    return f"candidate:{digest}"

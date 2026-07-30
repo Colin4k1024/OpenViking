@@ -182,6 +182,10 @@ class MemoryField(BaseModel):
     description: str = Field("", description="Field description")
     merge_op: MergeOp = Field(MergeOp.PATCH, description="Merge strategy")
     init_value: Optional[str] = Field(None, description="Initial value for this field")
+    system_managed: bool = Field(
+        False,
+        description="Whether this field is maintained by code and omitted from LLM output schemas",
+    )
 
 
 class MemoryTypeSchema(BaseModel):
@@ -317,6 +321,10 @@ class ResolvedOperations(BaseModel):
     errors: List[str]
     resolved_links: List[StoredLink] = Field(default_factory=list)
     delete_replacements: Dict[str, str] = Field(default_factory=dict)
+    link_replacements: Dict[str, str] = Field(
+        default_factory=dict,
+        description="URI remaps applied only to links; source files are not deleted",
+    )
 
     def has_errors(self) -> bool:
         return len(self.errors) > 0

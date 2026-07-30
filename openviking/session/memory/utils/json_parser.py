@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 __all__ = [
     "extract_json_content",
     "remove_json_trailing_content",
+    "parse_json_strict",
     "parse_json_with_stability",
     "value_fault_tolerance",
     "parse_value_with_tolerance",
@@ -46,6 +47,19 @@ __all__ = [
     "_any_to_str",
     "JsonUtils",
 ]
+
+
+def parse_json_strict(content: str) -> Tuple[Optional[Any], Optional[str]]:
+    """Parse a complete JSON document without extraction, repair, or coercion."""
+
+    if not isinstance(content, str) or not content.strip():
+        return None, "Empty content"
+    stripped = content.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        return None, f"Invalid complete JSON: {exc}"
+    return parsed, None
 
 
 class PydanticEncoder(json.JSONEncoder):

@@ -103,11 +103,15 @@ class SessionCommitPolicyTrainer:
         )
         analysis_list = [_analysis_from_rollout(rollout) for rollout in rollout_list]
         errors = [item["error"] for item in commit_results if item.get("error")]
+        committed_rollout_count = sum(
+            1 for item in commit_results if not item.get("skipped_reason")
+        )
         apply_result = PolicyApplyResult(
             updated_policy_set=policy_set,
             errors=errors,
             metadata={
-                "committed_rollout_count": len(commit_results),
+                "committed_rollout_count": committed_rollout_count,
+                "skipped_rollout_count": len(commit_results) - committed_rollout_count,
                 "commit_results": commit_results,
                 "run_id": self.run_id,
             },
@@ -141,18 +145,54 @@ class SessionCommitPolicyTrainer:
             execution_metadata=execution_metadata,
             rollout_index=index,
         )
+        case_spec_enabled = _commit_case_spec_enabled(
+            rollout,
+            override=self.commit_case_spec_enabled,
+        )
+        rollout_messages = [
+            message
+            for message in rollout.messages
+            if not _is_embedded_rollout_evaluation_message(message)
+        ]
+        if not case_spec_enabled and not rollout_messages:
+            skipped_reason = "empty_rollout_messages"
+            await self._record_event(
+                "train_commit_skipped",
+                rollout=rollout,
+                index=index,
+                session_id=session_id,
+                stage="skip_empty_rollout",
+                execution_metadata=execution_metadata,
+                task_id="",
+                archive_uri="",
+                trace_id=None,
+                telemetry_id=None,
+                task_status="skipped",
+                score=_rollout_score(rollout),
+                commit_case_spec_enabled=False,
+                skipped_reason=skipped_reason,
+            )
+            return {
+                "index": index,
+                "session_id": session_id,
+                "stage": "skip_empty_rollout",
+                "task_id": "",
+                "archive_uri": "",
+                "trace_id": None,
+                "telemetry_id": None,
+                "task_status": "skipped",
+                "score": _rollout_score(rollout),
+                "commit_case_spec_enabled": False,
+                "skipped_reason": skipped_reason,
+                "error": None,
+            }
         stage = "prepare_messages"
         try:
-            case_spec_enabled = _commit_case_spec_enabled(
-                rollout,
-                override=self.commit_case_spec_enabled,
-            )
             messages = (
                 ([_case_spec_message_to_request(rollout)] if case_spec_enabled else [])
                 + [
                     _message_to_request(message)
-                    for message in rollout.messages
-                    if not _is_embedded_rollout_evaluation_message(message)
+                    for message in rollout_messages
                 ]
                 + [_evaluation_message_to_request(rollout)]
             )
