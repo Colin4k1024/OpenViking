@@ -253,9 +253,7 @@ def test_streaming_memory_updater_serial_case_limit_is_independent_of_global_lim
     )
 
     assert (
-        updater._operation_limit_for_group(
-            MemoryMergeGroupKey(peer_id=None, memory_type="cases")
-        )
+        updater._operation_limit_for_group(MemoryMergeGroupKey(peer_id=None, memory_type="cases"))
         == 1
     )
 

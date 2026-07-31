@@ -32,9 +32,6 @@ content_template: |
   ## Situation
   {{ situation }}
 
-  ## Situation
-  {{ situation }}
-
   ## Linked Experiences
   {%- for link in links or [] %}
   {%- set target_uri = link.to_uri or "" %}

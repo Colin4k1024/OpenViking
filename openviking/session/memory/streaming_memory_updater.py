@@ -104,6 +104,12 @@ class _MergePlanBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _CaseComparisonRepairResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_comparisons: list[CaseIdentityComparison]
+
+
 @dataclass(slots=True)
 class StreamingMemoryUpdaterConfig:
     """Configuration for automatic streaming ordinary-memory updates."""
@@ -1028,6 +1034,7 @@ async def merge_one_memory_type_operations(
         finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
     if finish_reason in {"length", "max_tokens"}:
         raise MemoryMergePlanError(f"LLM merge output truncated: finish_reason={finish_reason}")
+
     def completion_content(value: Any) -> str:
         if value is None:
             return ""
@@ -1037,7 +1044,7 @@ async def merge_one_memory_type_operations(
             raise MemoryMergePlanError("LLM merge returned tool calls")
         return str(getattr(value, "content", "") or "")
 
-    def resolve_merge_plan(content: str) -> ResolvedOperations:
+    def parse_merge_plan(content: str) -> BaseModel:
         raw_plan, parse_error = parse_json_strict(content)
         if parse_error is not None:
             raise MemoryMergePlanError(parse_error)
@@ -1053,6 +1060,10 @@ async def merge_one_memory_type_operations(
                 required_proposals=proposals,
                 all_proposals=all_proposals,
             )
+        return plan
+
+    def resolve_parsed_merge_plan(plan: BaseModel) -> ResolvedOperations:
+        if memory_type == CASE_MEMORY_TYPE:
             validate_case_merge_plan(
                 plan,
                 required_proposals=proposals,
@@ -1078,73 +1089,114 @@ async def merge_one_memory_type_operations(
             )
         return merged
 
+    def resolve_merge_plan(content: str) -> ResolvedOperations:
+        return resolve_parsed_merge_plan(parse_merge_plan(content))
+
     content = completion_content(response)
     try:
         merged = resolve_merge_plan(content)
     except MemoryMergePlanError as exc:
-        retryable_case_errors = (
-            "Case groups do not match deterministic assignment:",
-            "Case compaction requires complete replacement fields:",
-            "Draft Case promotion requires generalized_case_identity",
-            "Draft Case promotion generalization failed:",
-        )
-        if memory_type != CASE_MEMORY_TYPE or not str(exc).startswith(retryable_case_errors):
-            raise
-        tracer.info(
-            "[streaming_memory_updater] retrying Case merge after semantic validation "
-            f"error={exc}",
-            console=trace_console,
-        )
-        correction_prompt = (
-            "The previous MERGE_PLAN failed server validation: "
-            f"{exc}. Return one corrected complete MERGE_PLAN JSON object. "
-            "Preserve valid case_comparisons and use the exact deterministic group "
-            "assignment stated by the server error. For every group that requires "
-            "compaction, replace task_signature, input, situation, rubric, and "
-            "evidence together. When promoting a draft, also provide a "
-            "generalized_case_identity derived from the semantic intersection of all "
-            "independent sources. Remove exact one-run values. Output JSON only."
-        )
-        response = await vlm.get_completion_async(
-            messages=[
-                *merge_messages,
-                {"role": "assistant", "content": content},
-                {"role": "user", "content": correction_prompt},
-            ],
-            tools=None,
-            thinking=False,
-        )
-        retry_finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
-        if retry_finish_reason in {"length", "max_tokens"}:
+        if memory_type == CASE_MEMORY_TYPE and str(exc).startswith(
+            "Case comparison coverage mismatch:"
+        ):
+            plan = parse_merge_plan(content)
+            missing_pairs = missing_case_comparison_pairs(
+                plan,
+                required_proposals=proposals,
+                all_proposals=all_proposals,
+            )
             tracer.info(
-                "[streaming_memory_updater] retrying truncated corrected Case merge "
-                "with ultra-concise output",
+                "[streaming_memory_updater] repairing missing Case comparisons "
+                f"pair_count={len(missing_pairs)}",
                 console=trace_console,
+            )
+            repaired_comparisons = await repair_missing_case_comparisons(
+                vlm=vlm,
+                missing_pairs=missing_pairs,
+                all_proposals=all_proposals,
+                completion_content=completion_content,
+            )
+            plan = plan.model_copy(
+                update={
+                    "case_comparisons": [
+                        *list(getattr(plan, "case_comparisons", []) or []),
+                        *repaired_comparisons,
+                    ]
+                }
+            )
+            try:
+                merged = resolve_parsed_merge_plan(plan)
+            except MemoryMergePlanError as repaired_exc:
+                exc = repaired_exc
+            else:
+                exc = None
+        if exc is None:
+            pass
+        else:
+            retryable_case_errors = (
+                "Case groups do not match deterministic assignment:",
+                "Case compaction requires complete replacement fields:",
+                "Draft Case promotion requires generalized_case_identity",
+                "Draft Case promotion generalization failed:",
+            )
+            if memory_type != CASE_MEMORY_TYPE or not str(exc).startswith(retryable_case_errors):
+                raise
+            tracer.info(
+                "[streaming_memory_updater] retrying Case merge after semantic validation "
+                f"error={exc}",
+                console=trace_console,
+            )
+            correction_prompt = (
+                "The previous MERGE_PLAN failed server validation: "
+                f"{exc}. Return one corrected complete MERGE_PLAN JSON object. "
+                "Preserve valid case_comparisons and use the exact deterministic group "
+                "assignment stated by the server error. For every group that requires "
+                "compaction, replace task_signature, input, situation, rubric, and "
+                "evidence together. When promoting a draft, also provide a "
+                "generalized_case_identity derived from the semantic intersection of all "
+                "independent sources. Remove exact one-run values. Output JSON only."
             )
             response = await vlm.get_completion_async(
                 messages=[
                     *merge_messages,
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{correction_prompt} The corrected output was truncated. Recreate it "
-                            "without quoting the previous output. Use no explanations. Limit "
-                            "task_signature to 40 words, situation to 45 words, evidence to 60 "
-                            "words, and each rubric criterion description to 20 words; use at "
-                            "most three rubric criteria. Keep compact JSON strings on one line."
-                        ),
-                    },
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": correction_prompt},
                 ],
                 tools=None,
                 thinking=False,
             )
             retry_finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
-        if retry_finish_reason in {"length", "max_tokens"}:
-            raise MemoryMergePlanError(
-                "LLM corrected Case merge output truncated after concise retry: "
-                f"finish_reason={retry_finish_reason}"
-            )
-        merged = resolve_merge_plan(completion_content(response))
+            if retry_finish_reason in {"length", "max_tokens"}:
+                tracer.info(
+                    "[streaming_memory_updater] retrying truncated corrected Case merge "
+                    "with ultra-concise output",
+                    console=trace_console,
+                )
+                response = await vlm.get_completion_async(
+                    messages=[
+                        *merge_messages,
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{correction_prompt} The corrected output was truncated. "
+                                "Recreate it without quoting the previous output. Use no "
+                                "explanations. Limit task_signature to 40 words, situation to "
+                                "45 words, evidence to 60 words, and each rubric criterion "
+                                "description to 20 words; use at most three rubric criteria. "
+                                "Keep compact JSON strings on one line."
+                            ),
+                        },
+                    ],
+                    tools=None,
+                    thinking=False,
+                )
+                retry_finish_reason = str(getattr(response, "finish_reason", "") or "").lower()
+            if retry_finish_reason in {"length", "max_tokens"}:
+                raise MemoryMergePlanError(
+                    "LLM corrected Case merge output truncated after concise retry: "
+                    f"finish_reason={retry_finish_reason}"
+                )
+            merged = resolve_merge_plan(completion_content(response))
     tracer.info(
         "[streaming_memory_updater] llm merge output "
         f"memory_type={memory_type} upserts={len(merged.upsert_operations)} "
@@ -1152,6 +1204,150 @@ async def merge_one_memory_type_operations(
         console=trace_console,
     )
     return merged
+
+
+def expected_case_comparison_pairs(
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> set[tuple[str, str]]:
+    required_upserts = [
+        proposal for proposal in required_proposals if proposal.operation is not None
+    ]
+    candidate_ids = sorted(
+        proposal_id for proposal_id, proposal in all_proposals.items() if proposal.is_candidate
+    )
+    expected_pairs: set[tuple[str, str]] = set()
+    previous_proposal_ids: list[str] = []
+    for proposal in required_upserts:
+        for candidate_id in [*candidate_ids, *previous_proposal_ids]:
+            if candidate_id != proposal.proposal_id:
+                expected_pairs.add((proposal.proposal_id, candidate_id))
+        previous_proposal_ids.append(proposal.proposal_id)
+    return expected_pairs
+
+
+def normalized_case_comparison_map(
+    comparisons: list[CaseIdentityComparison],
+    *,
+    expected_pairs: set[tuple[str, str]],
+) -> dict[tuple[str, str], CaseIdentityComparison]:
+    comparison_by_pair: dict[tuple[str, str], CaseIdentityComparison] = {}
+    for comparison in comparisons:
+        pair = (comparison.proposal_id, comparison.candidate_id)
+        reversed_pair = (comparison.candidate_id, comparison.proposal_id)
+        if pair not in expected_pairs and reversed_pair in expected_pairs:
+            pair = reversed_pair
+            comparison = comparison.model_copy(
+                update={
+                    "proposal_id": pair[0],
+                    "candidate_id": pair[1],
+                }
+            )
+        elif pair not in expected_pairs:
+            continue
+        if pair in comparison_by_pair:
+            raise MemoryMergePlanError(f"Duplicate Case comparison: {pair}")
+        comparison_by_pair[pair] = comparison
+    return comparison_by_pair
+
+
+def missing_case_comparison_pairs(
+    plan: BaseModel,
+    *,
+    required_proposals: list[MemoryMergeProposal],
+    all_proposals: dict[str, MemoryMergeProposal],
+) -> list[tuple[str, str]]:
+    expected_pairs = expected_case_comparison_pairs(
+        required_proposals=required_proposals,
+        all_proposals=all_proposals,
+    )
+    comparison_by_pair = normalized_case_comparison_map(
+        list(getattr(plan, "case_comparisons", []) or []),
+        expected_pairs=expected_pairs,
+    )
+    return sorted(expected_pairs - set(comparison_by_pair))
+
+
+async def repair_missing_case_comparisons(
+    *,
+    vlm: Any,
+    missing_pairs: list[tuple[str, str]],
+    all_proposals: dict[str, MemoryMergeProposal],
+    completion_content: Any,
+) -> list[CaseIdentityComparison]:
+    if not missing_pairs:
+        return []
+    proposal_ids = sorted({proposal_id for pair in missing_pairs for proposal_id in pair})
+    identities = {
+        proposal_id: _compact_case_proposal_context(all_proposals[proposal_id])
+        for proposal_id in proposal_ids
+    }
+    response = await vlm.get_completion_async(
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Classify only the requested Case identity pairs. For each pair, label "
+                    "goal, subject, action_pattern, success_boundary, and "
+                    "context_constraints as MATCH, COMPATIBLE, UNKNOWN, or CONFLICT. "
+                    'Return JSON only with shape {"case_comparisons":[...]}; include '
+                    "every requested pair exactly once and no other pairs."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "pairs": [
+                            {"proposal_id": left, "candidate_id": right}
+                            for left, right in missing_pairs
+                        ],
+                        "identities": identities,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            },
+        ],
+        tools=None,
+        thinking=False,
+    )
+    content = completion_content(response)
+    payload, parse_error = parse_json_strict(content)
+    if parse_error is not None:
+        raise MemoryMergePlanError(f"Invalid Case comparison repair JSON: {parse_error}")
+    try:
+        repaired = _CaseComparisonRepairResponse.model_validate(payload, strict=True)
+    except ValidationError as exc:
+        raise MemoryMergePlanError(f"Invalid Case comparison repair schema: {exc}") from exc
+    expected_pairs = set(missing_pairs)
+    comparison_by_pair = normalized_case_comparison_map(
+        repaired.case_comparisons,
+        expected_pairs=expected_pairs,
+    )
+    if set(comparison_by_pair) != expected_pairs:
+        missing = sorted(expected_pairs - set(comparison_by_pair))
+        raise MemoryMergePlanError(f"Case comparison repair coverage mismatch: missing={missing}")
+    return [comparison_by_pair[pair] for pair in missing_pairs]
+
+
+def _compact_case_proposal_context(proposal: MemoryMergeProposal) -> dict[str, Any]:
+    if proposal.operation is not None:
+        fields = dict(proposal.operation.memory_fields or {})
+    else:
+        memory_file = proposal.patch.before_file or proposal.patch.after_file
+        fields = dict(memory_file.extra_fields or {})
+    identity = (
+        parse_case_identity(fields.get(PROPOSED_CASE_IDENTITY_FIELD))
+        or parse_case_identity(fields.get(CASE_IDENTITY_FIELD))
+        or fallback_case_identity(fields)
+    )
+    return {
+        "case_name": str(fields.get("case_name") or ""),
+        "case_identity": identity.model_dump(mode="json"),
+        "task_signature": str(fields.get("task_signature") or "")[:500],
+    }
 
 
 def build_memory_merge_proposals(
@@ -1360,9 +1556,7 @@ def sanitize_case_merge_plan_payload(
         field_operations = group.get("field_operations")
         if isinstance(field_operations, dict):
             sanitized_group["field_operations"] = {
-                name: value
-                for name, value in field_operations.items()
-                if name in allowed_fields
+                name: value for name, value in field_operations.items() if name in allowed_fields
             }
         sanitized_groups.append(sanitized_group)
     sanitized["groups"] = sanitized_groups
@@ -1429,40 +1623,14 @@ def validate_case_merge_plan(
         proposal_id for proposal_id, proposal in all_proposals.items() if proposal.is_candidate
     )
     comparisons = list(getattr(plan, "case_comparisons", []) or [])
-    comparison_by_pair: dict[tuple[str, str], CaseIdentityComparison] = {}
-    expected_pairs: set[tuple[str, str]] = set()
-    previous_proposal_ids: list[str] = []
-
-    for proposal in required_upserts:
-        for candidate_id in [*candidate_ids, *previous_proposal_ids]:
-            if candidate_id == proposal.proposal_id:
-                continue
-            expected_pairs.add((proposal.proposal_id, candidate_id))
-        previous_proposal_ids.append(proposal.proposal_id)
-
-    for comparison in comparisons:
-        pair = (comparison.proposal_id, comparison.candidate_id)
-        reversed_pair = (comparison.candidate_id, comparison.proposal_id)
-        if pair not in expected_pairs and reversed_pair in expected_pairs:
-            pair = reversed_pair
-            comparison = comparison.model_copy(
-                update={
-                    "proposal_id": pair[0],
-                    "candidate_id": pair[1],
-                }
-            )
-        elif (
-            pair not in expected_pairs
-            and pair[0] in candidate_ids
-            and pair[1] in candidate_ids
-        ):
-            # Candidate files are read-only context. Models sometimes compare them
-            # with each other while reasoning about the best primary match; those
-            # comparisons do not affect assignment and are safe to ignore.
-            continue
-        if pair in comparison_by_pair:
-            raise MemoryMergePlanError(f"Duplicate Case comparison: {pair}")
-        comparison_by_pair[pair] = comparison
+    expected_pairs = expected_case_comparison_pairs(
+        required_proposals=required_proposals,
+        all_proposals=all_proposals,
+    )
+    comparison_by_pair = normalized_case_comparison_map(
+        comparisons,
+        expected_pairs=expected_pairs,
+    )
     actual_pairs = set(comparison_by_pair)
     if actual_pairs != expected_pairs:
         missing = sorted(expected_pairs - actual_pairs)
@@ -1660,9 +1828,7 @@ def finalize_case_merge_operations(
         )
         owned_source_ids = set(source_ids)
         pending_sources = [
-            item
-            for item in pending_sources
-            if str(item.get("source_id") or "") in owned_source_ids
+            item for item in pending_sources if str(item.get("source_id") or "") in owned_source_ids
         ]
         existing_fields = dict(existing_file.extra_fields or {}) if existing_file else {}
         last_compacted_source_count = int(existing_fields.get("last_compacted_source_count") or 0)

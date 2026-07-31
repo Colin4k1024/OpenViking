@@ -44,6 +44,7 @@ from openviking.session.memory.streaming_memory_updater import (
     finalize_case_merge_operations,
     normalize_case_merge_plan,
     reconstruct_memory_operations_from_plan,
+    repair_missing_case_comparisons,
     sanitize_case_merge_plan_payload,
     validate_case_merge_plan,
 )
@@ -161,6 +162,58 @@ def test_case_schema_exposes_identity_but_hides_system_fields_from_extractor():
     assert "## Evidence" not in schema.content_template
 
 
+@pytest.mark.asyncio
+async def test_missing_case_comparison_repair_uses_only_compact_identity_context():
+    operation = prepare_case_operation(_case_operation(session_id="new-source"))
+    schema = create_default_registry().get("cases")
+    required = build_memory_merge_proposals(
+        operations=[operation],
+        delete_files=[],
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    required[0].proposal_id = "new:0"
+    required[0].patch.proposal_id = "new:0"
+    candidate = _case_file()
+    candidate.extra_fields["rubric"] = "sensitive and very large rubric"
+    candidate.extra_fields["evidence"] = "large historical evidence"
+    candidate_id = candidate_id_for_uri(candidate.uri)
+    candidates = build_candidate_merge_proposals({candidate_id: candidate})
+    all_proposals = {proposal.proposal_id: proposal for proposal in [*required, *candidates]}
+
+    class FakeVLM:
+        calls = []
+
+        async def get_completion_async(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps(
+                {
+                    "case_comparisons": [
+                        _comparison(
+                            proposal_id="new:0",
+                            candidate_id=candidate_id,
+                        ).model_dump()
+                    ]
+                }
+            )
+
+    vlm = FakeVLM()
+    repaired = await repair_missing_case_comparisons(
+        vlm=vlm,
+        missing_pairs=[("new:0", candidate_id)],
+        all_proposals=all_proposals,
+        completion_content=lambda value: value,
+    )
+
+    assert len(repaired) == 1
+    assert repaired[0].proposal_id == "new:0"
+    prompt = "\n".join(str(message["content"]) for message in vlm.calls[0]["messages"])
+    assert "case_identity" in prompt
+    assert "task_signature" in prompt
+    assert "sensitive and very large rubric" not in prompt
+    assert "large historical evidence" not in prompt
+
+
 def test_case_merge_payload_ignores_system_managed_and_immutable_fields():
     schema = create_default_registry().get("cases")
     payload = {
@@ -188,9 +241,7 @@ def test_case_merge_payload_ignores_system_managed_and_immutable_fields():
     sanitized = sanitize_case_merge_plan_payload(payload, schema=schema)
 
     assert len(sanitized["groups"]) == 1
-    assert sanitized["groups"][0]["field_operations"] == {
-        "task_signature": "generalized task"
-    }
+    assert sanitized["groups"][0]["field_operations"] == {"task_signature": "generalized task"}
 
 
 def test_legacy_case_identity_fallback_does_not_use_rubric_text():
@@ -474,6 +525,96 @@ def test_case_plan_ignores_extra_read_only_candidate_comparisons():
     )
 
 
+def test_case_plan_ignores_irrelevant_extra_comparisons():
+    schema = create_default_registry().get("cases")
+    operation = prepare_case_operation(_case_operation(session_id="new"))
+    required = build_memory_merge_proposals(
+        operations=[operation],
+        delete_files=[],
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    required[0].proposal_id = "new:0"
+    required[0].patch.proposal_id = "new:0"
+    candidate_file = _case_file()
+    candidate_id = candidate_id_for_uri(candidate_file.uri)
+    candidates = build_candidate_merge_proposals({candidate_id: candidate_file})
+    all_proposals = {proposal.proposal_id: proposal for proposal in [*required, *candidates]}
+    model = create_memory_merge_plan_model(schema)
+    plan = model.model_validate(
+        {
+            "groups": [
+                {
+                    "proposal_ids": ["new:0"],
+                    "canonical_proposal_id": "new:0",
+                    "field_operations": {},
+                }
+            ],
+            "delete_proposal_ids": [],
+            "case_comparisons": [
+                _comparison(
+                    proposal_id="new:0",
+                    candidate_id=candidate_id,
+                    goal="CONFLICT",
+                ).model_dump(),
+                _comparison(
+                    proposal_id="unrelated:proposal",
+                    candidate_id=candidate_id,
+                ).model_dump(),
+            ],
+        }
+    )
+
+    validate_case_merge_plan(
+        plan,
+        required_proposals=required,
+        all_proposals=all_proposals,
+    )
+
+
+def test_case_plan_still_rejects_missing_required_comparisons():
+    schema = create_default_registry().get("cases")
+    operation = prepare_case_operation(_case_operation(session_id="new"))
+    required = build_memory_merge_proposals(
+        operations=[operation],
+        delete_files=[],
+        schema=schema,
+        extract_context=ExtractContext([]),
+    )
+    required[0].proposal_id = "new:0"
+    required[0].patch.proposal_id = "new:0"
+    candidate_file = _case_file()
+    candidate_id = candidate_id_for_uri(candidate_file.uri)
+    candidates = build_candidate_merge_proposals({candidate_id: candidate_file})
+    all_proposals = {proposal.proposal_id: proposal for proposal in [*required, *candidates]}
+    model = create_memory_merge_plan_model(schema)
+    plan = model.model_validate(
+        {
+            "groups": [
+                {
+                    "proposal_ids": ["new:0"],
+                    "canonical_proposal_id": "new:0",
+                    "field_operations": {},
+                }
+            ],
+            "delete_proposal_ids": [],
+            "case_comparisons": [
+                _comparison(
+                    proposal_id="unrelated:proposal",
+                    candidate_id=candidate_id,
+                ).model_dump()
+            ],
+        }
+    )
+
+    with pytest.raises(MemoryMergePlanError, match="coverage mismatch"):
+        validate_case_merge_plan(
+            plan,
+            required_proposals=required,
+            all_proposals=all_proposals,
+        )
+
+
 def test_case_plan_accepts_reversed_comparison_orientation():
     schema = create_default_registry().get("cases")
     operations = [
@@ -628,9 +769,7 @@ def test_case_plan_normalizes_existing_case_as_canonical():
                             '"variable_types":["source data location"]}'
                         ),
                         "situation": "A report must be prepared from source data.",
-                        "rubric": (
-                            '{"criteria":[{"name":"usable","required":true,"weight":1.0}]}'
-                        ),
+                        "rubric": ('{"criteria":[{"name":"usable","required":true,"weight":1.0}]}'),
                         "evidence": "Two independent sessions support this Case.",
                     },
                 }
@@ -778,9 +917,7 @@ def test_case_ordinary_update_ignores_unscheduled_body_rewrite():
 
     assert fields["source_count"] == 3
     assert fields["last_compacted_source_count"] == 2
-    assert [item["source_id"] for item in fields[CASE_PENDING_SOURCES_FIELD]] == [
-        "session:new-3"
-    ]
+    assert [item["source_id"] for item in fields[CASE_PENDING_SOURCES_FIELD]] == ["session:new-3"]
     assert not set({"task_signature", "input", "situation", "rubric", "evidence"}) & set(fields)
 
 
@@ -839,9 +976,7 @@ def test_compatible_identity_waits_for_scheduled_compaction():
 
     assert fields["source_count"] == 3
     assert fields["last_compacted_source_count"] == 2
-    assert [item["source_id"] for item in fields[CASE_PENDING_SOURCES_FIELD]] == [
-        "session:new-3"
-    ]
+    assert [item["source_id"] for item in fields[CASE_PENDING_SOURCES_FIELD]] == ["session:new-3"]
 
 
 def test_second_source_compaction_rejects_partial_body():
@@ -1086,8 +1221,7 @@ def test_conflicting_target_is_split_into_new_draft_without_deleting_original():
     assert new_operation.memory_fields["case_status"] == "draft"
     assert new_operation.memory_fields[CASE_SOURCE_IDS_FIELD] == ["session:conflict"]
     assert [
-        item["source_id"]
-        for item in new_operation.memory_fields[CASE_PENDING_SOURCES_FIELD]
+        item["source_id"] for item in new_operation.memory_fields[CASE_PENDING_SOURCES_FIELD]
     ] == ["session:conflict"]
     assert "_variant_" in new_operation.uris[0]
     assert finalized.delete_file_contents == []

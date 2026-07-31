@@ -94,6 +94,7 @@ class PostValidationRetryDecision:
     discard: bool = False
     include_latest_draft: bool = False
     latest_draft_override: Any = None
+    compact_retry_context: bool = False
 
 
 PostValidationHook = Callable[
@@ -280,6 +281,7 @@ OUTPUT_SCHEMA definition itself.
         for uri in self.context_provider.read_file_contents:
             self._extract_context.page_id_map.get_page_id(uri)
 
+        skip_next_final_instruction = False
         while iteration < max_iterations:
             iteration += 1
             tracer.info(f"ReAct iteration {iteration}/{max_iterations}")
@@ -288,13 +290,14 @@ OUTPUT_SCHEMA definition itself.
             is_last_iteration = iteration >= max_iterations
 
             # If last iteration, add a message telling the model to return result directly
-            if is_last_iteration:
+            if is_last_iteration and not skip_next_final_instruction:
                 messages.append(
                     {
                         "role": "user",
                         "content": self._build_final_operations_instruction(),
                     }
                 )
+            skip_next_final_instruction = False
 
             # Call LLM with tools - model decides: tool calls OR final operations
             tool_calls, operations = await self._call_llm(messages)
@@ -381,14 +384,25 @@ OUTPUT_SCHEMA definition itself.
                                     "content": self._serialize_operations_draft(retry_draft),
                                 }
                             )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": self._build_post_validation_retry_instruction(
-                                    decision.instruction
-                                ),
-                            }
-                        )
+                        retry_instruction = {
+                            "role": "user",
+                            "content": self._build_post_validation_retry_instruction(
+                                decision.instruction
+                            ),
+                        }
+                        if decision.compact_retry_context:
+                            system_messages = [
+                                message for message in messages if message.get("role") == "system"
+                            ]
+                            draft_messages = [messages[-1]] if decision.include_latest_draft else []
+                            messages = [
+                                *system_messages,
+                                *draft_messages,
+                                retry_instruction,
+                            ]
+                            skip_next_final_instruction = True
+                        else:
+                            messages.append(retry_instruction)
                         tracer.info(
                             f"Extended max_iterations to {max_iterations} for post-validation retry",
                             console=True,

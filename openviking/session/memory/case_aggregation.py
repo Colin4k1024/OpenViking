@@ -284,6 +284,7 @@ def case_generalization_post_validation(
     return PostValidationRetryDecision(
         retry=True,
         include_latest_draft=True,
+        compact_retry_context=True,
         instruction=(
             "Case generalization validation failed:\n"
             f"{details}\n\n"

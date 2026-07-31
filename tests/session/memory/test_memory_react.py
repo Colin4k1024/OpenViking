@@ -373,6 +373,7 @@ class TestExtractLoopPostValidationHook:
                 retry=True,
                 instruction="Rewrite the complete JSON object with a source-bound correction.",
                 include_latest_draft=True,
+                compact_retry_context=True,
             ),
             None,
         ]
@@ -423,6 +424,11 @@ class TestExtractLoopPostValidationHook:
             message["role"] == "user" and "source-bound correction" in message["content"]
             for message in retry_messages
         )
+        assert [message["role"] for message in retry_messages] == [
+            "system",
+            "assistant",
+            "user",
+        ]
 
     @pytest.mark.asyncio
     async def test_post_validation_hook_can_discard_without_exception(self):
