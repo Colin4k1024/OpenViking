@@ -7,6 +7,7 @@ Common logic for creating Context objects and enqueuing them to EmbeddingQueue.
 """
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -24,6 +25,7 @@ from openviking.storage.queuefs import get_queue_manager
 from openviking.storage.queuefs.embedding_msg_converter import EmbeddingMsgConverter
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
+from openviking.utils.embedding_input import truncate_embedding_input
 from openviking.utils.image_search import image_bytes_to_data_uri
 from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.utils import VikingURI, get_logger
@@ -38,6 +40,7 @@ logger = get_logger(__name__)
 # not retrievable). Cap it with headroom, mirroring
 # memory_updater._truncate_memory_abstract introduced for the memory path (#2774).
 _ABSTRACT_MAX_BYTES = 50_000
+_ABSTRACT_PREVIEW_SUFFIX = "\n...(truncated)"
 
 
 def _truncate_abstract_bytes(abstract: str) -> str:
@@ -46,6 +49,32 @@ def _truncate_abstract_bytes(abstract: str) -> str:
     if len(encoded) <= _ABSTRACT_MAX_BYTES:
         return abstract or ""
     return encoded[:_ABSTRACT_MAX_BYTES].decode("utf-8", errors="ignore")
+
+
+def _resolve_vectors_only_abstract_preview_tokens(config: Any) -> int:
+    vectordb_cfg = getattr(getattr(config, "storage", None), "vectordb", None)
+    explicit_budget = getattr(vectordb_cfg, "vectors_only_abstract_preview_tokens", None)
+    if explicit_budget is not None:
+        try:
+            return max(0, int(explicit_budget))
+        except (TypeError, ValueError):
+            return 0
+    embedding_cfg = getattr(config, "embedding", None)
+    embedding_budget = getattr(embedding_cfg, "max_input_tokens", 4096)
+    try:
+        return max(0, int(embedding_budget))
+    except (TypeError, ValueError):
+        return 4096
+
+
+def _build_vectors_only_abstract_preview(content: str, config: Any) -> str:
+    budget = _resolve_vectors_only_abstract_preview_tokens(config)
+    if budget <= 0:
+        return ""
+    preview = re.sub(r"\s+", " ", content or "").strip()
+    if not preview:
+        return ""
+    return truncate_embedding_input(preview, budget, suffix=_ABSTRACT_PREVIEW_SUFFIX)
 
 
 _PORTABLE_SCALAR_FIELDS = frozenset(
@@ -445,6 +474,7 @@ async def vectorize_file(
     scalar_override: Optional[Dict[str, Any]] = None,
     register_request_wait: bool = False,
     ingest_options: IngestOptions | None = None,
+    use_content_preview_as_abstract: bool = False,
 ) -> None:
     """
     Vectorize a single file.
@@ -493,7 +523,8 @@ async def vectorize_file(
         )
 
         content_type = get_resource_content_type(file_name)
-        embedding_cfg = get_openviking_config().embedding
+        openviking_config = get_openviking_config()
+        embedding_cfg = openviking_config.embedding
         configured_text_source = getattr(embedding_cfg, "text_source", "content_only")
         effective_text_source = "summary_only" if use_summary else configured_text_source
 
@@ -533,6 +564,10 @@ async def vectorize_file(
                     logger.warning(f"No summary available for {file_path}, skipping vectorization")
                     return
             else:
+                if use_content_preview_as_abstract and not summary:
+                    context.abstract = _truncate_abstract_bytes(
+                        _build_vectors_only_abstract_preview(content, openviking_config)
+                    )
                 if summary and effective_text_source in {"summary_first", "summary_only"}:
                     # Use summary for vectorization, but reuse the single raw text read for BM25.
                     context.set_vectorize(Vectorize(text=summary, full_text=content or summary))

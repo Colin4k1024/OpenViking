@@ -169,6 +169,138 @@ async def test_vectorize_file_registers_request_wait_with_embedding_msg_id(monke
 
 
 @pytest.mark.asyncio
+async def test_vectorize_file_can_use_content_preview_as_abstract(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("alpha    beta\n\ngamma"))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=1000),
+            storage=types.SimpleNamespace(
+                vectordb=types.SimpleNamespace(vectors_only_abstract_preview_tokens=None)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_utils.EmbeddingMsgConverter,
+        "from_context",
+        lambda context: context,
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://user/default/resources/test.md",
+        summary_dict={"name": "test.md", "summary": ""},
+        parent_uri="viking://user/default/resources",
+        ctx=DummyReq(),
+        use_content_preview_as_abstract=True,
+    )
+
+    assert len(queue.items) == 1
+    assert queue.items[0].abstract == "alpha beta gamma"
+    assert queue.items[0].get_vectorization_text() == "alpha    beta\n\ngamma"
+
+
+@pytest.mark.asyncio
+async def test_vectors_only_preview_does_not_change_summary_first_embedding_text(monkeypatch):
+    queue = DummyQueue()
+    content = "alpha    beta\n\ngamma"
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS(content))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="summary_first", max_input_tokens=1000),
+            storage=types.SimpleNamespace(
+                vectordb=types.SimpleNamespace(vectors_only_abstract_preview_tokens=None)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_utils.EmbeddingMsgConverter,
+        "from_context",
+        lambda context: context,
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://user/default/resources/test.md",
+        summary_dict={"name": "test.md", "summary": ""},
+        parent_uri="viking://user/default/resources",
+        ctx=DummyReq(),
+        use_content_preview_as_abstract=True,
+    )
+
+    assert queue.items[0].abstract == "alpha beta gamma"
+    assert queue.items[0].get_vectorization_text() == content
+
+
+@pytest.mark.asyncio
+async def test_vectorize_file_preview_token_budget_defaults_to_embedding_limit(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("一二三四五六"))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=3),
+            storage=types.SimpleNamespace(
+                vectordb=types.SimpleNamespace(vectors_only_abstract_preview_tokens=None)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_utils.EmbeddingMsgConverter,
+        "from_context",
+        lambda context: context,
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://user/default/resources/test.md",
+        summary_dict={"name": "test.md", "summary": ""},
+        parent_uri="viking://user/default/resources",
+        ctx=DummyReq(),
+        use_content_preview_as_abstract=True,
+    )
+
+    assert queue.items[0].abstract == "一二三\n...(truncated)"
+
+
+@pytest.mark.asyncio
+async def test_vectorize_file_explicit_preview_zero_keeps_empty_abstract(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("alpha beta"))
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=1000),
+            storage=types.SimpleNamespace(
+                vectordb=types.SimpleNamespace(vectors_only_abstract_preview_tokens=0)
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_utils.EmbeddingMsgConverter,
+        "from_context",
+        lambda context: context,
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://user/default/resources/test.md",
+        summary_dict={"name": "test.md", "summary": ""},
+        parent_uri="viking://user/default/resources",
+        ctx=DummyReq(),
+        use_content_preview_as_abstract=True,
+    )
+
+    assert queue.items[0].abstract == ""
+
+
+@pytest.mark.asyncio
 async def test_vectorize_file_marks_registered_wait_root_failed_when_enqueue_raises(monkeypatch):
     queue = FailingQueue()
     registered = []

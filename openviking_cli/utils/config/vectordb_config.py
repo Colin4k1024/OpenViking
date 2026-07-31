@@ -320,6 +320,17 @@ class VectorDBBackendConfig(BaseModel):
         ),
     )
 
+    vectors_only_abstract_preview_tokens: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=8192,
+        description=(
+            "Estimated token budget for abstract previews generated from raw content "
+            "when processing_mode='vectors_only'. None follows embedding.max_input_tokens; "
+            "0 disables preview generation."
+        ),
+    )
+
     volcengine: Optional[VolcengineConfig] = Field(
         default_factory=VolcengineConfig,
         description="Volcengine VikingDB configuration for 'volcengine' type",

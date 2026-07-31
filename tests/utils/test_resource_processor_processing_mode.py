@@ -113,6 +113,7 @@ async def test_vectors_only_persists_tree_and_vectorizes_files_only(monkeypatch,
         "name": "page.md",
         "summary": "",
     }
+    assert vectorize_file.await_args.kwargs["use_content_preview_as_abstract"] is True
     assert vectorize_file.await_args.kwargs["ingest_options"] == IngestOptions(
         search_tags=["team=search"],
         search_tag_mode="append",

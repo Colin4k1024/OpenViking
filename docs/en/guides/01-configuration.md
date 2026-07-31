@@ -1264,6 +1264,7 @@ Vector database storage configuration
 | `distance_metric` | str | Distance metric for vector similarity search (e.g., 'cosine', 'l2', 'ip') | "cosine" |
 | `dimension` | int | Vector embedding dimension | 0 |
 | `sparse_weight` | float | Sparse weight for hybrid vector search, only effective when using hybrid index | 0.0 |
+| `vectors_only_abstract_preview_tokens` | int or null | Estimated token budget for VectorDB `abstract` previews generated from raw content when `processing_mode="vectors_only"`; `null` follows `embedding.max_input_tokens`, and `0` disables previews. This does not affect embedding input truncation or `full_text` writes | null |
 | `volcengine` | object | 'volcengine' type VikingDB configuration | - |
 | `vikingdb` | object | 'vikingdb' type private deployment configuration | - |
 | `cuvs` | object | NVIDIA cuVS configuration for the 'cuvs' backend and the opt-in memory-aware auto mode on 'local'; see the [cuVS guide](./16-cuvs.md) | - |
@@ -1773,6 +1774,7 @@ For detailed encryption explanations, see [Data Encryption](../concepts/10-encry
 
 Notes:
 - `storage.vectordb.sparse_weight` controls hybrid (dense + sparse) indexing/search. It only takes effect when you use a hybrid index; set it > 0 to enable sparse signals.
+- `storage.vectordb.vectors_only_abstract_preview_tokens` only affects the `abstract` display field for `vectors_only` ingestion. It is not a model-generated summary and does not trigger semantic understanding.
 
 ## Troubleshooting
 

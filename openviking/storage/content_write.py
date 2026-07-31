@@ -722,7 +722,7 @@ class ContentWriteCoordinator:
                 previous_content = await self._viking_fs.read_file(uri, ctx=ctx)
             if wait and telemetry_id:
                 get_request_wait_tracker().register_request(telemetry_id)
-            await self._write_in_place(
+            written_content_text = await self._write_in_place(
                 uri,
                 content,
                 mode=mode,
@@ -735,6 +735,7 @@ class ContentWriteCoordinator:
                     uri=uri,
                     context_type=context_type,
                     ctx=ctx,
+                    content=written_content_text,
                 )
                 post_process_started = True
             else:
@@ -818,6 +819,7 @@ class ContentWriteCoordinator:
         uri: str,
         context_type: str,
         ctx: RequestContext,
+        content: str,
     ) -> None:
         parent = VikingURI(uri).parent
         if parent is None:
@@ -825,11 +827,12 @@ class ContentWriteCoordinator:
         name = uri.rstrip("/").rsplit("/", 1)[-1]
         await vectorize_file(
             file_path=uri,
-            summary_dict={"name": name, "summary": ""},
+            summary_dict={"name": name, "summary": "", "content": content},
             parent_uri=parent.uri,
             context_type=context_type,
             ctx=ctx,
             register_request_wait=True,
+            use_content_preview_as_abstract=True,
         )
 
     def _validate_mode(self, mode: str) -> None:
@@ -941,7 +944,7 @@ class ContentWriteCoordinator:
         mode: str,
         ctx: RequestContext,
         lock_handle: Optional["LockHandle"] = None,
-    ) -> None:
+    ) -> str:
         if context_type_for_uri(uri) == "memory":
             if mode == "replace":
                 existing_raw = await self._viking_fs.read_file(uri, ctx=ctx)
@@ -954,13 +957,14 @@ class ContentWriteCoordinator:
             else:
                 mf = MemoryFileUtils.read(content, uri=uri)
             sync_memory_resource_refs(mf, source=RESOURCE_REF_SOURCE_CONTENT_WRITE)
+            written_content = MemoryFileUtils.write(mf)
             await self._viking_fs.write_file(
                 uri,
-                MemoryFileUtils.write(mf),
+                written_content,
                 ctx=ctx,
                 lock_handle=lock_handle,
             )
-            return
+            return written_content
 
         if mode == "append":
             existing_raw = await self._viking_fs.read_file(uri, ctx=ctx)
@@ -973,8 +977,9 @@ class ContentWriteCoordinator:
                 ctx=ctx,
                 lock_handle=lock_handle,
             )
-            return
+            return updated_raw
         await self._viking_fs.write_file(uri, content, ctx=ctx, lock_handle=lock_handle)
+        return content
 
     async def _enqueue_semantic_refresh(
         self,

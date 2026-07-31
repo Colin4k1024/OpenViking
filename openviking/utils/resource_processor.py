@@ -623,6 +623,7 @@ class ResourceProcessor:
                 ctx=ctx,
                 ingest_options=ingest_options,
                 register_request_wait=True,
+                use_content_preview_as_abstract=True,
             )
 
     async def reserve_unique_candidate(

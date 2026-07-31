@@ -69,10 +69,41 @@ async def test_vectors_only_write_skips_semantic_refresh_and_vectorizes_file(mon
     assert vectorize_file.await_args.kwargs["summary_dict"] == {
         "name": "demo.md",
         "summary": "",
+        "content": "updated",
     }
+    assert vectorize_file.await_args.kwargs["use_content_preview_as_abstract"] is True
     assert vectorize_file.await_args.kwargs["register_request_wait"] is True
     assert result["semantic_status"] == "skipped"
     assert result["vector_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_vectors_only_append_vectorizes_full_written_content(monkeypatch, ctx):
+    fake_fs = _FakeVikingFS()
+    fake_fs.read_file.return_value = "before "
+    final_content = "normalized final content"
+    lock_manager = _FakeLockManager()
+    vectorize_file = AsyncMock()
+    monkeypatch.setattr(content_write_module, "get_lock_manager", lambda: lock_manager)
+    monkeypatch.setattr(content_write_module, "vectorize_file", vectorize_file, raising=False)
+    coordinator = ContentWriteCoordinator(viking_fs=fake_fs)
+    coordinator._write_in_place = AsyncMock(return_value=final_content)
+
+    await coordinator._write_direct_with_refresh(
+        uri="viking://resources/demo.md",
+        root_uri="viking://resources",
+        content="after",
+        mode="append",
+        context_type="resource",
+        wait=False,
+        timeout=None,
+        ctx=ctx,
+        written_bytes=5,
+        telemetry_id="",
+        processing_mode="vectors_only",
+    )
+
+    assert vectorize_file.await_args.kwargs["summary_dict"]["content"] == final_content
 
 
 @pytest.mark.asyncio

@@ -1232,6 +1232,7 @@ RAGFS 默认使用 Rust binding 模式，通过 Rust 实现直接访问文件系
 | `distance_metric` | str | 向量相似度搜索的距离度量（例如 'cosine', 'l2', 'ip'） | "cosine" |
 | `dimension` | int | 向量嵌入的维度 | 0 |
 | `sparse_weight` | float | 混合向量搜索的稀疏权重，仅在使用混合索引时生效 | 0.0 |
+| `vectors_only_abstract_preview_tokens` | int 或 null | `processing_mode="vectors_only"` 时，从正文生成向量库 `abstract` 展示预览的估算 token 预算；`null` 表示跟随 `embedding.max_input_tokens`，`0` 表示关闭。该字段不影响 embedding 输入截断或 `full_text` 写入 | null |
 | `volcengine` | object | 'volcengine' 类型的 VikingDB 配置 | - |
 | `vikingdb` | object | 'vikingdb' 类型的私有部署配置 | - |
 | `cuvs` | object | NVIDIA cuVS 配置，也用于在 'local' 下显式开启显存感知自动模式，参见 [cuVS 使用指南](./16-cuvs.md) | - |
@@ -1738,6 +1739,7 @@ Task 记录文件位于所属账号的系统目录：
 
 说明：
 - `storage.vectordb.sparse_weight` 用于混合（dense + sparse）索引/检索的权重，仅在使用 hybrid 索引时生效；设置为 > 0 才会启用 sparse 信号。
+- `storage.vectordb.vectors_only_abstract_preview_tokens` 只影响 `vectors_only` 入库结果里的 `abstract` 展示字段；它不是模型摘要，不会触发语义理解。
 
 ## 故障排除
 
