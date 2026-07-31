@@ -408,7 +408,9 @@ async def remove_user(
     storage = getattr(viking_fs, "vector_store", None)
     if storage is not None:
         try:
-            deleted = await storage.delete_user_data(account_id, user_id)
+            deleted = await storage.delete_user_data(
+                account_id, user_id, ctx=cleanup_ctx
+            )
             logger.info(
                 f"VectorDB cascade delete for user {account_id}/{user_id}: {deleted} records"
             )
@@ -450,6 +452,12 @@ async def remove_user(
         )
 
     # All configured cleanups succeeded; only now remove the registry entry.
+    # This invalidates the user's credential, so subsequent requests cannot
+    # authenticate as this user and recreate residual state. The cascade is
+    # not atomic against a request already past authentication when deletion
+    # began; such an in-flight write can land in the cleanup-to-removal
+    # window. Closing that window requires a per-user deletion barrier
+    # (tombstone) checked on the write path and is left as follow-up.
     await manager.remove_user(account_id, user_id)
     return Response(status="ok", result={"deleted": True})
 

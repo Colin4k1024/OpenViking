@@ -33,11 +33,15 @@ def _acct(prefix="acct") -> str:
 
 class _FakeVectorStore:
     def __init__(self):
-        self.delete_user_calls: list[tuple[str, str]] = []
+        # Mirrors production VikingVectorIndexBackend.delete_user_data signature:
+        # ctx is keyword-only and required.
+        self.delete_user_calls: list[tuple[str, str, object]] = []
         self.raise_on_delete: Exception | None = None
 
-    async def delete_user_data(self, account_id: str, user_id: str) -> int:
-        self.delete_user_calls.append((account_id, user_id))
+    async def delete_user_data(
+        self, account_id: str, user_id: str, *, ctx: object
+    ) -> int:
+        self.delete_user_calls.append((account_id, user_id, ctx))
         if self.raise_on_delete is not None:
             raise self.raise_on_delete
         return 3
@@ -275,7 +279,11 @@ async def test_remove_user_cascades_agfs_vectors_oauth_and_usage(cascade_client)
     assert rm["ctx"].account_id == acct
     assert rm["ctx"].user.user_id == "bob"
 
-    assert cascade_client.viking_fs.vector_store.delete_user_calls == [(acct, "bob")]
+    vector_calls = cascade_client.viking_fs.vector_store.delete_user_calls
+    assert [c[:2] for c in vector_calls] == [(acct, "bob")]
+    assert isinstance(vector_calls[0][2], RequestContext)
+    assert vector_calls[0][2].role == Role.ROOT
+    assert vector_calls[0][2].user.user_id == "bob"
     assert cascade_client._oauth_store.revoke_calls == [
         {"account_id": acct, "user_id": "bob"}
     ]
@@ -317,7 +325,9 @@ async def test_remove_user_cascade_is_per_user(cascade_client):
     assert rm["uri"] == "viking://user/bob/"
     assert rm["recursive"] is True
     assert rm["ctx"].user.user_id == "bob"
-    assert cascade_client.viking_fs.vector_store.delete_user_calls == [(acct, "bob")]
+    vector_calls = cascade_client.viking_fs.vector_store.delete_user_calls
+    assert [c[:2] for c in vector_calls] == [(acct, "bob")]
+    assert isinstance(vector_calls[0][2], RequestContext)
     assert _user_exists(cascade_client.manager, acct, "carol")
 
 
@@ -360,9 +370,9 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
     if stage == "agfs":
         assert len(cascade_client.viking_fs.rm_calls) == 1
     elif stage == "vectordb":
-        assert cascade_client.viking_fs.vector_store.delete_user_calls == [
-            (acct, "bob")
-        ]
+        vector_calls = cascade_client.viking_fs.vector_store.delete_user_calls
+        assert [c[:2] for c in vector_calls] == [(acct, "bob")]
+        assert isinstance(vector_calls[0][2], RequestContext)
     elif stage == "oauth":
         assert cascade_client._oauth_store.revoke_calls == [
             {"account_id": acct, "user_id": "bob"}
@@ -398,7 +408,9 @@ async def test_remove_user_retry_succeeds_after_transient_failure(cascade_client
     assert len(cascade_client.viking_fs.rm_calls) == 2
     # Vector delete runs on the successful retry; it is idempotent, so any
     # extra prior invocation (if stages were partially reached) is harmless.
-    assert cascade_client.viking_fs.vector_store.delete_user_calls[-1] == (acct, "bob")
+    last_call = cascade_client.viking_fs.vector_store.delete_user_calls[-1]
+    assert last_call[:2] == (acct, "bob")
+    assert isinstance(last_call[2], RequestContext)
 
 
 async def test_remove_user_rolls_back_live_registry_on_persistence_failure(
@@ -470,4 +482,6 @@ async def test_remove_user_skips_absent_oauth_and_usage(cascade_client):
     assert resp.status_code == 200, resp.text
     assert not _user_exists(cascade_client.manager, acct, "bob")
     assert len(cascade_client.viking_fs.rm_calls) == 1
-    assert cascade_client.viking_fs.vector_store.delete_user_calls == [(acct, "bob")]
+    vector_calls = cascade_client.viking_fs.vector_store.delete_user_calls
+    assert [c[:2] for c in vector_calls] == [(acct, "bob")]
+    assert isinstance(vector_calls[0][2], RequestContext)
