@@ -92,6 +92,10 @@ class MemoryMergePlanError(ValueError):
     """Raised when a merge plan is truncated, malformed, or incomplete."""
 
 
+class MemoryMergePlanParseError(MemoryMergePlanError):
+    """Raised when a merge plan is not a complete JSON document."""
+
+
 class _MergePlanFieldOperationsBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1047,7 +1051,7 @@ async def merge_one_memory_type_operations(
     def parse_merge_plan(content: str) -> BaseModel:
         raw_plan, parse_error = parse_json_strict(content)
         if parse_error is not None:
-            raise MemoryMergePlanError(parse_error)
+            raise MemoryMergePlanParseError(parse_error)
         if memory_type == CASE_MEMORY_TYPE:
             raw_plan = sanitize_case_merge_plan_payload(raw_plan, schema=schema)
         try:
@@ -1089,17 +1093,67 @@ async def merge_one_memory_type_operations(
             )
         return merged
 
-    def resolve_merge_plan(content: str) -> ResolvedOperations:
-        return resolve_parsed_merge_plan(parse_merge_plan(content))
+    json_repair_attempted = False
+
+    async def parse_merge_plan_with_json_repair(content: str) -> tuple[BaseModel, str]:
+        nonlocal json_repair_attempted
+        try:
+            return parse_merge_plan(content), content
+        except MemoryMergePlanParseError as exc:
+            if json_repair_attempted:
+                raise
+            json_repair_attempted = True
+            tracer.info(
+                "[streaming_memory_updater] repairing malformed merge plan JSON",
+                console=trace_console,
+            )
+            repair_response = await vlm.get_completion_async(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Repair JSON syntax only. Preserve every key, value, array item, "
+                            "and string from the malformed draft; change only punctuation, "
+                            "delimiters, quoting, or escaping required to produce one complete "
+                            "JSON object. Do not add, remove, summarize, or reinterpret semantic "
+                            "content. Return JSON only. The repaired object must conform to this "
+                            f"MERGE_PLAN schema:\n{plan_schema}"
+                        ),
+                    },
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"The strict JSON parser reported: {exc}. "
+                            "Return the complete syntax-repaired JSON object only."
+                        ),
+                    },
+                ],
+                tools=None,
+                thinking=False,
+            )
+            repair_finish_reason = str(getattr(repair_response, "finish_reason", "") or "").lower()
+            if repair_finish_reason in {"length", "max_tokens"}:
+                raise MemoryMergePlanError(
+                    f"LLM merge JSON repair output truncated: finish_reason={repair_finish_reason}"
+                )
+            repaired_content = completion_content(repair_response)
+            try:
+                repaired_plan = parse_merge_plan(repaired_content)
+            except MemoryMergePlanParseError as repair_exc:
+                raise MemoryMergePlanError(
+                    f"LLM merge JSON repair failed: {repair_exc}"
+                ) from repair_exc
+            return repaired_plan, repaired_content
 
     content = completion_content(response)
+    plan, content = await parse_merge_plan_with_json_repair(content)
     try:
-        merged = resolve_merge_plan(content)
+        merged = resolve_parsed_merge_plan(plan)
     except MemoryMergePlanError as exc:
         if memory_type == CASE_MEMORY_TYPE and str(exc).startswith(
             "Case comparison coverage mismatch:"
         ):
-            plan = parse_merge_plan(content)
             missing_pairs = missing_case_comparison_pairs(
                 plan,
                 required_proposals=proposals,
@@ -1196,7 +1250,9 @@ async def merge_one_memory_type_operations(
                     "LLM corrected Case merge output truncated after concise retry: "
                     f"finish_reason={retry_finish_reason}"
                 )
-            merged = resolve_merge_plan(completion_content(response))
+            corrected_content = completion_content(response)
+            corrected_plan, _ = await parse_merge_plan_with_json_repair(corrected_content)
+            merged = resolve_parsed_merge_plan(corrected_plan)
     tracer.info(
         "[streaming_memory_updater] llm merge output "
         f"memory_type={memory_type} upserts={len(merged.upsert_operations)} "

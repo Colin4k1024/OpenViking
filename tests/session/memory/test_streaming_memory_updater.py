@@ -1359,20 +1359,89 @@ async def test_patch_merge_rejects_missing_proposal_without_raw_fallback(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("response", "error_pattern"),
-    [
-        ('{"groups":[', "Invalid complete JSON"),
-        (
-            VLMResponse(
-                content='{"groups":[],"delete_proposal_ids":[]}',
-                finish_reason="length",
-            ),
-            "output truncated",
-        ),
-    ],
-)
-async def test_patch_merge_rejects_truncated_output(monkeypatch, response, error_pattern):
+async def test_patch_merge_repairs_invalid_json_once(monkeypatch):
+    valid_plan = json.dumps(
+        {
+            "groups": [
+                {
+                    "proposal_ids": ["batch:0"],
+                    "canonical_proposal_id": "batch:0",
+                    "field_operations": {},
+                },
+                {
+                    "proposal_ids": ["batch:1"],
+                    "canonical_proposal_id": "batch:1",
+                    "field_operations": {},
+                },
+            ],
+            "delete_proposal_ids": [],
+        }
+    )
+    malformed_plan = valid_plan.replace(
+        '"proposal_ids": ["batch:0"], "canonical_proposal_id"',
+        '"proposal_ids": ["batch:0"] "canonical_proposal_id"',
+        1,
+    )
+    responses = iter([malformed_plan, valid_plan])
+    fake_vlm = _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: next(responses),
+    )
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    merged = await merge_one_memory_type_operations(
+        memory_type="notes",
+        operations=[_note_op("note_a"), _note_op("note_b")],
+        messages=[],
+        ctx=_ctx(),
+        registry=_registry(),
+    )
+
+    assert len(merged.upsert_operations) == 2
+    assert len(fake_vlm.calls) == 2
+    repair_messages = fake_vlm.calls[1]["messages"]
+    assert "Repair JSON syntax only" in repair_messages[0]["content"]
+    assert repair_messages[1] == {"role": "assistant", "content": malformed_plan}
+    assert "Invalid complete JSON" in repair_messages[2]["content"]
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_rejects_json_that_remains_invalid_after_one_repair(monkeypatch):
+    malformed_plan = '{"groups":[{"proposal_ids":["batch:0"] "field_operations":{}}]}'
+    fake_vlm = _install_fake_merge_vlm(
+        monkeypatch,
+        responder=lambda messages: malformed_plan,
+    )
+    fs = InMemoryVikingFS({})
+    fs.search = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "openviking.session.memory.streaming_memory_updater.get_viking_fs",
+        lambda: fs,
+    )
+
+    with pytest.raises(MemoryMergePlanError, match="JSON repair failed"):
+        await merge_one_memory_type_operations(
+            memory_type="notes",
+            operations=[_note_op("note_a"), _note_op("note_b")],
+            messages=[],
+            ctx=_ctx(),
+            registry=_registry(),
+        )
+
+    assert len(fake_vlm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_patch_merge_rejects_truncated_output(monkeypatch):
+    response = VLMResponse(
+        content='{"groups":[],"delete_proposal_ids":[]}',
+        finish_reason="length",
+    )
     _install_fake_merge_vlm(monkeypatch, responder=lambda messages: response)
     fs = InMemoryVikingFS({})
     fs.search = AsyncMock(return_value=[])
@@ -1381,7 +1450,7 @@ async def test_patch_merge_rejects_truncated_output(monkeypatch, response, error
         lambda: fs,
     )
 
-    with pytest.raises(MemoryMergePlanError, match=error_pattern):
+    with pytest.raises(MemoryMergePlanError, match="output truncated"):
         await merge_one_memory_type_operations(
             memory_type="notes",
             operations=[_note_op("note_a"), _note_op("note_b")],
