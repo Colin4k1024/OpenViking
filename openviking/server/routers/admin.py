@@ -389,16 +389,16 @@ async def remove_user(
     )
 
     viking_fs = get_viking_fs()
-    failures: list[str] = []
+    failed_stages: list[str] = []
 
     # Remove AGFS data under the user's subtree. A missing subtree is a
     # successful no-op (rm is idempotent); any other error aborts deletion.
     user_prefix = f"viking://user/{user_id}/"
     try:
         await viking_fs.rm(user_prefix, recursive=True, ctx=cleanup_ctx)
-    except Exception as e:
-        failures.append(f"agfs: {e}")
-        logger.warning(f"AGFS cleanup failed for {account_id}/{user_id}: {e}")
+    except Exception:
+        failed_stages.append("agfs")
+        logger.exception(f"AGFS cleanup failed for {account_id}/{user_id}")
 
     # Remove VectorDB records owned by the user. The vector store is an
     # optional backend exposed publicly as viking_fs.vector_store; absent
@@ -412,9 +412,9 @@ async def remove_user(
             logger.info(
                 f"VectorDB cascade delete for user {account_id}/{user_id}: {deleted} records"
             )
-        except Exception as e:
-            failures.append(f"vectordb: {e}")
-            logger.warning(f"VectorDB cleanup failed for {account_id}/{user_id}: {e}")
+        except Exception:
+            failed_stages.append("vectordb")
+            logger.exception(f"VectorDB cleanup failed for {account_id}/{user_id}")
 
     # Revoke OAuth tokens/codes. Absent OAuth store => disabled => skip.
     oauth_store = getattr(request.app.state, "oauth_store", None)
@@ -423,28 +423,30 @@ async def remove_user(
             await oauth_store.revoke_user_tokens(
                 account_id=account_id, user_id=user_id
             )
-        except Exception as e:
-            failures.append(f"oauth: {e}")
-            logger.warning(f"OAuth cleanup failed for {account_id}/{user_id}: {e}")
+        except Exception:
+            failed_stages.append("oauth")
+            logger.exception(f"OAuth cleanup failed for {account_id}/{user_id}")
 
-    # Purge usage/audit rows. Absent runtime => disabled => skip.
+    # Purge usage/audit rows. Absent runtime => disabled => skip. The runtime
+    # drains already-accepted events before purging so a queued event cannot
+    # re-create deleted rows after the purge.
     usage_runtime = getattr(request.app.state, "usage_audit_runtime", None)
     if usage_runtime is not None and getattr(usage_runtime, "store", None) is not None:
         try:
-            await usage_runtime.store.delete_user_data(
+            await usage_runtime.delete_user_data(
                 account_id=account_id, user_id=user_id
             )
-        except Exception as e:
-            failures.append(f"usage_audit: {e}")
-            logger.warning(
-                f"Usage/audit cleanup failed for {account_id}/{user_id}: {e}"
-            )
+        except Exception:
+            failed_stages.append("usage_audit")
+            logger.exception(f"Usage/audit cleanup failed for {account_id}/{user_id}")
 
-    if failures:
-        # Keep the user registered so deletion can be retried safely.
+    if failed_stages:
+        # Keep the user registered so deletion can be retried safely. Stage
+        # names only are surfaced; backend exception details stay in logs and
+        # are not leaked to clients.
         raise InternalError(
             f"User cleanup failed for {account_id}/{user_id}; user remains registered. "
-            "Retry after resolving: " + "; ".join(failures),
+            "Retry after resolving stages: " + ", ".join(failed_stages),
         )
 
     # All configured cleanups succeeded; only now remove the registry entry.

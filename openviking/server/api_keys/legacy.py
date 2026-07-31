@@ -368,6 +368,8 @@ class LegacyAPIKeyManager:
 
         user_info = account.users.pop(user_id)
         key_or_hash = user_info.get("key", "")
+        key_prefix = ""
+        original_prefix_entries: list[UserKeyEntry] | None = None
 
         if key_or_hash:
             # Get key_prefix - if not in user_info, compute from key
@@ -377,6 +379,7 @@ class LegacyAPIKeyManager:
 
             # Remove from prefix index
             if key_prefix in self._prefix_index:
+                original_prefix_entries = list(self._prefix_index[key_prefix])
                 self._prefix_index[key_prefix] = [
                     entry
                     for entry in self._prefix_index[key_prefix]
@@ -386,7 +389,18 @@ class LegacyAPIKeyManager:
                 if not self._prefix_index[key_prefix]:
                     del self._prefix_index[key_prefix]
 
-        await self._save_users_json(account_id)
+        try:
+            await self._save_users_json(account_id)
+        except Exception:
+            # The in-memory registry is the live authentication source. If
+            # persistence fails, restore the popped entry and prefix index so
+            # the caller observes a consistent state and can safely retry the
+            # whole deletion instead of a split-brain (gone in memory, still
+            # present on disk) registry.
+            account.users[user_id] = user_info
+            if original_prefix_entries is not None:
+                self._prefix_index[key_prefix] = original_prefix_entries
+            raise
 
     async def regenerate_key(
         self, account_id: str, user_id: str, seed: Optional[str] = None

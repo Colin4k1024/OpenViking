@@ -68,3 +68,23 @@ async def test_usage_audit_worker_close_waits_for_inflight_batch_after_timeout()
 
     assert store.calls == 1
     assert [[event.event_name for event in batch] for batch in store.batches] == [["demo"]]
+
+
+@pytest.mark.asyncio
+async def test_worker_flush_returns_after_accepted_events_persisted():
+    store = SlowFirstFlushStore()
+    worker = UsageAuditWorker(
+        store,
+        queue_size=10,
+        batch_size=10,
+        flush_interval_seconds=1.0,
+    )
+    await worker.start()
+    worker.enqueue(ObservabilityEvent(event_name="demo", payload={"value": 1}))
+
+    # Must not hang: queue.join() only completes once task_done() is called for
+    # every accepted event, which the worker does after a successful flush.
+    await asyncio.wait_for(worker.flush(), timeout=1.0)
+
+    assert [[event.event_name for event in batch] for batch in store.batches] == [["demo"]]
+    await worker.close(timeout_seconds=0.5)

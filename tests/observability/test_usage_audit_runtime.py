@@ -60,3 +60,51 @@ async def test_usage_audit_runtime_subscribes_to_shared_event_bus(tmp_path):
     assert retrievals["find"] == 1
     assert audit["total"] == 1
     assert audit["items"][0]["request_id"] == "req-runtime"
+
+
+@pytest.mark.asyncio
+async def test_runtime_delete_user_data_flushes_pending_events_before_purge(tmp_path):
+    """Already-accepted events must be persisted before the purge so they cannot
+    re-create rows for a deleted user after the DELETE commits."""
+    _GLOBAL_EVENT_BUS.clear()
+    app = SimpleNamespace(state=SimpleNamespace())
+    config = ServerConfig(
+        observability=ObservabilityConfig(
+            usage_audit=UsageAuditConfig(
+                sqlite_path=str(tmp_path / "usage.sqlite3"),
+                # Long interval: the event only lands in the DB via flush().
+                flush_interval_seconds=10.0,
+                timezone="UTC",
+            )
+        )
+    )
+    runtime = await init_usage_audit_from_server_config(config, app=app, service=object())
+    assert runtime is not None
+    try:
+        try_publish_event(
+            "http.request",
+            {
+                "request_id": "req-delete",
+                "account_id": "acct-delete",
+                "user_id": "user-delete",
+                "method": "POST",
+                "route": "/api/v1/sessions/abc/messages",
+                "status": "200",
+                "duration_seconds": 0.01,
+            },
+        )
+
+        deleted = await runtime.delete_user_data(
+            account_id="acct-delete",
+            user_id="user-delete",
+        )
+        # The pending event was drained and then purged; no rows must remain.
+        assert sum(deleted.values()) >= 1
+        audit = await runtime.store.query_audit_logs(
+            account_id="acct-delete",
+            user_id="user-delete",
+        )
+        assert audit["total"] == 0
+    finally:
+        await shutdown_usage_audit(app=app)
+        _GLOBAL_EVENT_BUS.clear()

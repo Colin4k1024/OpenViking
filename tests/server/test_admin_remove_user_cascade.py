@@ -76,9 +76,25 @@ class _FakeUsageStore:
         }
 
 
+class _FakeUsageWorker:
+    def __init__(self):
+        self.flushed = 0
+
+    async def flush(self):
+        self.flushed += 1
+
+
 class _FakeUsageRuntime:
     def __init__(self, store):
         self.store = store
+        self.worker = _FakeUsageWorker()
+
+    async def delete_user_data(self, *, account_id: str, user_id: str) -> dict:
+        await self.worker.flush()
+        return await self.store.delete_user_data(
+            account_id=account_id,
+            user_id=user_id,
+        )
 
 
 class _RecordingAGFS:
@@ -335,6 +351,11 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
         cascade_client.manager, acct, "bob"
     ), f"user must remain registered after {stage} failure for safe retry"
 
+    # Public error must name only the failed stage, never leak raw backend text.
+    body = resp.text
+    assert stage in body
+    assert "boom" not in body
+
     # The failed stage must still have been attempted so retry can resume.
     if stage == "agfs":
         assert len(cascade_client.viking_fs.rm_calls) == 1
@@ -350,6 +371,8 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
         assert cascade_client._usage_store.delete_calls == [
             {"account_id": acct, "user_id": "bob"}
         ]
+        # The accepted-event drain must run before the purge.
+        assert cascade_client.app.state.usage_audit_runtime.worker.flushed == 1
 
 
 async def test_remove_user_retry_succeeds_after_transient_failure(cascade_client):
@@ -376,6 +399,33 @@ async def test_remove_user_retry_succeeds_after_transient_failure(cascade_client
     # Vector delete runs on the successful retry; it is idempotent, so any
     # extra prior invocation (if stages were partially reached) is harmless.
     assert cascade_client.viking_fs.vector_store.delete_user_calls[-1] == (acct, "bob")
+
+
+async def test_remove_user_rolls_back_live_registry_on_persistence_failure(
+    cascade_client, monkeypatch
+):
+    """If registry persistence fails, the in-memory auth state must roll back."""
+    acct = _acct("registry_retry")
+    user_key = await _register_account_and_user(cascade_client, acct, "bob")
+
+    legacy = cascade_client.manager._legacy
+    original_save = legacy._save_users_json
+
+    async def _fail_save(_account_id):
+        raise RuntimeError("registry persistence unavailable")
+
+    monkeypatch.setattr(legacy, "_save_users_json", _fail_save)
+    with pytest.raises(RuntimeError, match="registry persistence unavailable"):
+        await cascade_client.manager.remove_user(acct, "bob")
+
+    # User is still resolvable after the failed persistence (rollback).
+    assert _user_exists(cascade_client.manager, acct, "bob")
+    assert cascade_client.manager.resolve(user_key).user_id == "bob"
+
+    # Retry after persistence recovers succeeds and removes the user.
+    monkeypatch.setattr(legacy, "_save_users_json", original_save)
+    await cascade_client.manager.remove_user(acct, "bob")
+    assert not _user_exists(cascade_client.manager, acct, "bob")
 
 
 # ---- absent optional subsystems are skipped, not failed -------------------

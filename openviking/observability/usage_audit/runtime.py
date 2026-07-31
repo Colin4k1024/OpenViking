@@ -36,6 +36,19 @@ class UsageAuditRuntime:
     api_service: UsageAuditQueryService
     shutdown_flush_timeout_seconds: float
 
+    async def delete_user_data(self, *, account_id: str, user_id: str) -> dict[str, int]:
+        """Drain accepted events, then purge one user's persisted projections.
+
+        Events already accepted by the background worker must be flushed before
+        the purge; otherwise a later flush could re-insert rows for a user that
+        was just deleted.
+        """
+        await self.worker.flush()
+        return await self.store.delete_user_data(
+            account_id=account_id,
+            user_id=user_id,
+        )
+
 
 def _resolve_sqlite_path(config: ServerConfig) -> Path:
     configured = config.observability.usage_audit.sqlite_path
