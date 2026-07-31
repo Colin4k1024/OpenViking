@@ -593,10 +593,20 @@ class OAuthStore:
                 "UPDATE oauth_codes SET used = 1 WHERE account_id = ? AND user_id = ? AND used = 0",
                 (account_id, user_id),
             ).rowcount
+            # Verified-but-not-yet-exchanged pending authorizations carry the
+            # verifier's (account, user); delete them so a deletion in flight
+            # cannot be completed into fresh tokens afterward. Unverified rows
+            # have null verified_user_id and cannot be tied to this user.
+            pending = self._conn.execute(
+                "DELETE FROM oauth_pending_authorizations "
+                "WHERE verified_account_id = ? AND verified_user_id = ?",
+                (account_id, user_id),
+            ).rowcount
             return {
                 "access_tokens_revoked": access,
                 "refresh_tokens_revoked": refresh,
                 "codes_revoked": codes,
+                "pending_authorizations_revoked": pending,
             }
 
         async with self._lock:

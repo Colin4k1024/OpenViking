@@ -338,15 +338,67 @@ async def test_revoke_user_tokens_cascades(store):
     )
     await _insert_code(store, "code-alice", account_id="acct", user_id="alice")
 
+    # A verified-but-not-yet-exchanged pending authorization for alice must be
+    # removed so it cannot be completed into fresh tokens after deletion; an
+    # unverified one (no bound identity) and bob's are left alone.
+    alice_pending = await store.create_pending_authorization(
+        client_id="cx",
+        redirect_uri="https://example/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=None,
+        resource=None,
+        state=None,
+        display_code="ALICE-1",
+    )
+    assert await store.mark_pending_verified(
+        pending_id=alice_pending,
+        account_id="acct",
+        user_id="alice",
+        role="user",
+        verified_key_fp=_FP,
+    )
+    bob_pending = await store.create_pending_authorization(
+        client_id="cx",
+        redirect_uri="https://example/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=None,
+        resource=None,
+        state=None,
+        display_code="BOB-1",
+    )
+    assert await store.mark_pending_verified(
+        pending_id=bob_pending,
+        account_id="acct",
+        user_id="bob",
+        role="user",
+        verified_key_fp=_FP_OTHER,
+    )
+    unverified_pending = await store.create_pending_authorization(
+        client_id="cx",
+        redirect_uri="https://example/cb",
+        redirect_uri_provided_explicitly=True,
+        code_challenge="chal",
+        scopes=None,
+        resource=None,
+        state=None,
+        display_code="OPEN-1",
+    )
+
     counts = await store.revoke_user_tokens(account_id="acct", user_id="alice")
     assert counts["access_tokens_revoked"] == 1
     assert counts["refresh_tokens_revoked"] == 1
     assert counts["codes_revoked"] == 1
+    assert counts["pending_authorizations_revoked"] == 1
 
-    # Alice's everything dead, Bob's untouched.
+    # Alice's everything dead, Bob's and the unverified pending untouched.
     assert await store.load_access("at-1") is None
     assert await store.load_access("at-other") is not None
     assert await store.consume_auth_code("code-alice") is None
+    assert await store.load_pending_authorization(alice_pending) is None
+    assert await store.load_pending_authorization(bob_pending) is not None
+    assert await store.load_pending_authorization(unverified_pending) is not None
 
 
 @pytest.mark.asyncio
