@@ -256,9 +256,7 @@ async def test_sqlite_usage_audit_store_aggregates_dashboard_data(tmp_path):
             bucket="hour",
             tz=UTC,
         )
-        assert any(
-            row["hour"] == 1 and row["session_add_message"] == 2 for row in account_commits
-        )
+        assert any(row["hour"] == 1 and row["session_add_message"] == 2 for row in account_commits)
         assert any(row["hour"] == 1 and row["session_add_message"] == 1 for row in commits)
         audit = await store.query_audit_logs(account_id="acct-1")
         assert audit["total"] == 4
@@ -631,19 +629,27 @@ async def test_delete_user_data_purges_only_target_user_and_is_idempotent(tmp_pa
 
         conn = store._conn
         assert conn is not None
-        assert conn.execute(
-            "SELECT COUNT(*) FROM usage_token_hourly "
-            "WHERE account_id = ? AND user_id = ?",
-            ("acct-1", "victim"),
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT COALESCE(SUM(token_count), 0) FROM usage_token_hourly "
-            "WHERE account_id = ? AND user_id = ?",
-            ("acct-1", "sibling"),
-        ).fetchone()[0] > 0
-        assert conn.execute(
-            "SELECT COUNT(*) FROM request_audit WHERE account_id = ? AND user_id = ?",
-            ("acct-1", "victim"),
-        ).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM usage_token_hourly WHERE account_id = ? AND user_id = ?",
+                ("acct-1", "victim"),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COALESCE(SUM(token_count), 0) FROM usage_token_hourly "
+                "WHERE account_id = ? AND user_id = ?",
+                ("acct-1", "sibling"),
+            ).fetchone()[0]
+            > 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM request_audit WHERE account_id = ? AND user_id = ?",
+                ("acct-1", "victim"),
+            ).fetchone()[0]
+            == 0
+        )
     finally:
         await store.close()

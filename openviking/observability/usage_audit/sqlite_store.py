@@ -103,14 +103,10 @@ class SQLiteUsageAuditStore:
             self._conn.close()
             self._conn = None
 
-    async def delete_user_data(
-        self, *, account_id: str, user_id: str
-    ) -> dict[str, int]:
+    async def delete_user_data(self, *, account_id: str, user_id: str) -> dict[str, int]:
         """Delete all usage/audit rows for a (account, user) pair."""
         async with self._lock:
-            return await asyncio.to_thread(
-                self._delete_user_data_sync, account_id, user_id
-            )
+            return await asyncio.to_thread(self._delete_user_data_sync, account_id, user_id)
 
     def _delete_user_data_sync(self, account_id: str, user_id: str) -> dict[str, int]:
         assert self._conn is not None
@@ -361,9 +357,7 @@ class SQLiteUsageAuditStore:
         assert self._conn is not None
         day = date.fromisoformat(user_date)
         utc_start, utc_end = _user_day_window_utc(day, tz)
-        rows = self._fetch_hourly_token_rows(
-            account_id, utc_start, utc_end, user_id=user_id
-        )
+        rows = self._fetch_hourly_token_rows(account_id, utc_start, utc_end, user_id=user_id)
         result = {"vlm_input": 0, "vlm_output": 0, "embedding_input": 0}
         for source, token_type, _, _, total in rows:
             key = f"{source}_{token_type}"

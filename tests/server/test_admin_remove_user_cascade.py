@@ -38,9 +38,7 @@ class _FakeVectorStore:
         self.delete_user_calls: list[tuple[str, str, object]] = []
         self.raise_on_delete: Exception | None = None
 
-    async def delete_user_data(
-        self, account_id: str, user_id: str, *, ctx: object
-    ) -> int:
+    async def delete_user_data(self, account_id: str, user_id: str, *, ctx: object) -> int:
         self.delete_user_calls.append((account_id, user_id, ctx))
         if self.raise_on_delete is not None:
             raise self.raise_on_delete
@@ -118,9 +116,7 @@ class _RecordingAGFS:
     def ensure_parent_dirs(self, path, **_kwargs):
         return None
 
-    def pathlock_acquire_exact(
-        self, fs_ctx, path, timeout_secs=0.0, owner_lease_ref=None
-    ):
+    def pathlock_acquire_exact(self, fs_ctx, path, timeout_secs=0.0, owner_lease_ref=None):
         return {"lease_ref": f"test:{path}"}
 
     def pathlock_release(self, fs_ctx, lease):
@@ -151,9 +147,7 @@ class _RecordingVikingFS:
 class _FakeService:
     def __init__(self, viking_fs):
         self.viking_fs = viking_fs
-        self.sessions = type(
-            "S", (), {"get_agent_evolution_enabled": lambda self: False}
-        )()
+        self.sessions = type("S", (), {"get_agent_evolution_enabled": lambda self: False})()
 
     async def initialize_account_directories(self, ctx):
         return None
@@ -183,9 +177,7 @@ async def cascade_client(monkeypatch):
             status_code=500,
             content=Response(
                 status="error",
-                error=ErrorInfo(
-                    code=exc.code, message=exc.message, details=exc.details
-                ),
+                error=ErrorInfo(code=exc.code, message=exc.message, details=exc.details),
             ).model_dump(),
         )
 
@@ -211,9 +203,7 @@ async def cascade_client(monkeypatch):
     app.include_router(admin_router.router)
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as c:
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         c.app = app
         c.viking_fs = viking_fs
         c.manager = manager
@@ -284,12 +274,8 @@ async def test_remove_user_cascades_agfs_vectors_oauth_and_usage(cascade_client)
     assert isinstance(vector_calls[0][2], RequestContext)
     assert vector_calls[0][2].role == Role.ROOT
     assert vector_calls[0][2].user.user_id == "bob"
-    assert cascade_client._oauth_store.revoke_calls == [
-        {"account_id": acct, "user_id": "bob"}
-    ]
-    assert cascade_client._usage_store.delete_calls == [
-        {"account_id": acct, "user_id": "bob"}
-    ]
+    assert cascade_client._oauth_store.revoke_calls == [{"account_id": acct, "user_id": "bob"}]
+    assert cascade_client._usage_store.delete_calls == [{"account_id": acct, "user_id": "bob"}]
     assert not _user_exists(cascade_client.manager, acct, "bob")
 
 
@@ -345,9 +331,7 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
     if stage == "agfs":
         cascade_client.viking_fs.raise_on_rm = RuntimeError("agfs boom")
     elif stage == "vectordb":
-        cascade_client.viking_fs.vector_store.raise_on_delete = RuntimeError(
-            "vector boom"
-        )
+        cascade_client.viking_fs.vector_store.raise_on_delete = RuntimeError("vector boom")
     elif stage == "oauth":
         cascade_client._oauth_store.raise_on_revoke = RuntimeError("oauth boom")
     elif stage == "usage_audit":
@@ -357,9 +341,9 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
         f"/api/v1/admin/accounts/{acct}/users/bob", headers=_root_headers()
     )
     assert resp.status_code >= 400, resp.text
-    assert _user_exists(
-        cascade_client.manager, acct, "bob"
-    ), f"user must remain registered after {stage} failure for safe retry"
+    assert _user_exists(cascade_client.manager, acct, "bob"), (
+        f"user must remain registered after {stage} failure for safe retry"
+    )
 
     # Public error must name only the failed stage, never leak raw backend text.
     body = resp.text
@@ -374,13 +358,9 @@ async def test_remove_user_fails_closed_when_cleanup_stage_fails(cascade_client,
         assert [c[:2] for c in vector_calls] == [(acct, "bob")]
         assert isinstance(vector_calls[0][2], RequestContext)
     elif stage == "oauth":
-        assert cascade_client._oauth_store.revoke_calls == [
-            {"account_id": acct, "user_id": "bob"}
-        ]
+        assert cascade_client._oauth_store.revoke_calls == [{"account_id": acct, "user_id": "bob"}]
     elif stage == "usage_audit":
-        assert cascade_client._usage_store.delete_calls == [
-            {"account_id": acct, "user_id": "bob"}
-        ]
+        assert cascade_client._usage_store.delete_calls == [{"account_id": acct, "user_id": "bob"}]
         # The accepted-event drain must run before the purge.
         assert cascade_client.app.state.usage_audit_runtime.worker.flushed == 1
 

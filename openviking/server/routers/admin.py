@@ -408,9 +408,7 @@ async def remove_user(
     storage = getattr(viking_fs, "vector_store", None)
     if storage is not None:
         try:
-            deleted = await storage.delete_user_data(
-                account_id, user_id, ctx=cleanup_ctx
-            )
+            deleted = await storage.delete_user_data(account_id, user_id, ctx=cleanup_ctx)
             logger.info(
                 f"VectorDB cascade delete for user {account_id}/{user_id}: {deleted} records"
             )
@@ -422,9 +420,7 @@ async def remove_user(
     oauth_store = getattr(request.app.state, "oauth_store", None)
     if oauth_store is not None:
         try:
-            await oauth_store.revoke_user_tokens(
-                account_id=account_id, user_id=user_id
-            )
+            await oauth_store.revoke_user_tokens(account_id=account_id, user_id=user_id)
         except Exception:
             failed_stages.append("oauth")
             logger.exception(f"OAuth cleanup failed for {account_id}/{user_id}")
@@ -435,9 +431,7 @@ async def remove_user(
     usage_runtime = getattr(request.app.state, "usage_audit_runtime", None)
     if usage_runtime is not None and getattr(usage_runtime, "store", None) is not None:
         try:
-            await usage_runtime.delete_user_data(
-                account_id=account_id, user_id=user_id
-            )
+            await usage_runtime.delete_user_data(account_id=account_id, user_id=user_id)
         except Exception:
             failed_stages.append("usage_audit")
             logger.exception(f"Usage/audit cleanup failed for {account_id}/{user_id}")
