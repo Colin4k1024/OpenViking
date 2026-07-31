@@ -122,6 +122,7 @@ class OpenVikingService:
             config.storage,
             config.embedding.max_concurrent,
             config.vlm.max_concurrent,
+            config.parsers.max_concurrent_parse,
             binding_config=binding_config,
             git_config=config.git,
         )
@@ -137,6 +138,7 @@ class OpenVikingService:
         config: StorageConfig,
         max_concurrent_embedding: int = 10,
         max_concurrent_semantic: int = 32,
+        max_concurrent_parse: int = 4,
         binding_config: Any = None,
         *,
         git_config: Optional[GitConfig] = None,
@@ -157,6 +159,7 @@ class OpenVikingService:
                 mount_point=queue_mount_point,
                 max_concurrent_embedding=max_concurrent_embedding,
                 max_concurrent_semantic=max_concurrent_semantic,
+                max_concurrent_parse=max_concurrent_parse,
             )
         else:
             logger.warning("RAGFS client not initialized, skipping queue manager")
@@ -290,6 +293,7 @@ class OpenVikingService:
                 self._config.storage,
                 self._config.embedding.max_concurrent,
                 self._config.vlm.max_concurrent,
+                self._config.parsers.max_concurrent_parse,
                 binding_config=self._build_ragfs_binding_config(),
                 git_config=self._config.git,
             )
