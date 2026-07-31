@@ -113,9 +113,6 @@ async def test_manual_memory_batching_100_files(monkeypatch):
 
     mock_fs = MockVikingFS()
 
-    # 3. 模拟 WaitTracker
-    mock_wait_tracker = MagicMock()
-
     # 使用 patch.multiple 来模拟多个 get_xxx 方法
     with (
         patch(
@@ -123,10 +120,6 @@ async def test_manual_memory_batching_100_files(monkeypatch):
             return_value=mock_config,
         ),
         patch("openviking.storage.queuefs.semantic_processor.get_viking_fs", return_value=mock_fs),
-        patch(
-            "openviking.storage.queuefs.semantic_processor.get_request_wait_tracker",
-            return_value=mock_wait_tracker,
-        ),
     ):
         # 4. 初始化 Processor 并设置并发
         processor = SemanticProcessor(max_concurrent_llm=10)
@@ -178,7 +171,6 @@ async def test_manual_memory_batching_100_files(monkeypatch):
     # 100次 摘要生成 + 1次 overview(L1) + 1次 abstract(L0)
     # 因为 read_file 也被 mock 了，所以构造过程不再消耗 call_count
     assert mock_vlm.call_count >= 102
-    assert mock_wait_tracker.mark_semantic_done.called
 
     print("[Manual Test] 分批逻辑压力测试及并发验证成功。")
 

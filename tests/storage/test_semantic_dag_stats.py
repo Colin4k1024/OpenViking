@@ -6,13 +6,23 @@ import asyncio
 import pytest
 
 from openviking.server.identity import RequestContext, Role
-from openviking.service.task_work_index import TaskWorkIndex, TaskWorkRejected
+from openviking.service.task_work_index import (
+    TaskWorkIndex,
+    TaskWorkRejected,
+    bind_task_context,
+    get_task_context,
+)
 from openviking.storage.queuefs.named_queue import NamedQueue
 from openviking.storage.queuefs.semantic_dag import (
     DagStats,
     DagWork,
     SemanticDagExecutor,
     SemanticNodeScheduler,
+)
+from openviking.telemetry import (
+    OperationTelemetry,
+    bind_telemetry,
+    get_current_telemetry,
 )
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -44,6 +54,7 @@ class _FakeProcessor:
     def __init__(self, verify_streaming=False):
         self.vectorized_dirs = []
         self.vectorized_files = []
+        self.vectorized_contexts = {}
         self.verify_streaming = verify_streaming
 
     async def _generate_single_file_summary(self, file_path, llm_sem=None, ctx=None):
@@ -87,6 +98,11 @@ class _FakeProcessor:
         if self.verify_streaming:
             assert summary_dict["content"]
         self.vectorized_files.append(file_path)
+        task_context = get_task_context()
+        self.vectorized_contexts[file_path] = (
+            task_context.task_id if task_context is not None else None,
+            get_current_telemetry().telemetry_id,
+        )
 
     async def _vectorize_directory_simple(self, uri, context_type, abstract, overview, ctx=None):
         await self._vectorize_directory(uri, context_type, abstract, overview, ctx=ctx)
@@ -218,26 +234,40 @@ async def test_semantic_dag_shares_node_scheduler_across_roots(monkeypatch):
 
     processor = _TrackingProcessor()
     ctx = RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER)
-    executor_a = SemanticDagExecutor(
-        processor=processor,
-        context_type="resource",
-        max_concurrent_llm=4,
-        ctx=ctx,
-        skip_vectorization=True,
-    )
-    executor_b = SemanticDagExecutor(
-        processor=processor,
-        context_type="resource",
-        max_concurrent_llm=4,
-        ctx=ctx,
-        skip_vectorization=True,
-    )
+    telemetry_a = OperationTelemetry("semantic-a")
+    telemetry_b = OperationTelemetry("semantic-b")
+    with (
+        bind_task_context("task-a", "acc1", "user1"),
+        bind_telemetry(telemetry_a),
+    ):
+        executor_a = SemanticDagExecutor(
+            processor=processor,
+            context_type="resource",
+            max_concurrent_llm=1,
+            ctx=ctx,
+        )
+    with (
+        bind_task_context("task-b", "acc1", "user1"),
+        bind_telemetry(telemetry_b),
+    ):
+        executor_b = SemanticDagExecutor(
+            processor=processor,
+            context_type="resource",
+            max_concurrent_llm=1,
+            ctx=ctx,
+        )
 
     await asyncio.gather(executor_a.run(root_a), executor_b.run(root_b))
 
-    assert processor.max_active_summaries <= 4
+    assert processor.max_active_summaries == 1
     assert executor_a.get_stats().done_nodes == 21
     assert executor_b.get_stats().done_nodes == 21
+    assert {
+        processor.vectorized_contexts[f"{root_a}/a-{idx}.txt"] for idx in range(20)
+    } == {("task-a", telemetry_a.telemetry_id)}
+    assert {
+        processor.vectorized_contexts[f"{root_b}/b-{idx}.txt"] for idx in range(20)
+    } == {("task-b", telemetry_b.telemetry_id)}
 
 
 @pytest.mark.asyncio

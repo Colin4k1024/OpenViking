@@ -4,6 +4,7 @@
 
 import asyncio
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Set
 from weakref import WeakKeyDictionary
@@ -12,7 +13,7 @@ from openviking.server.identity import RequestContext
 from openviking.service.task_work_index import bind_task_context, get_task_context
 from openviking.storage.queuefs.semantic_sidecar import write_semantic_sidecars
 from openviking.storage.viking_fs import LS_ALL_NODES, get_viking_fs
-from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
+from openviking.telemetry import bind_telemetry, get_current_telemetry
 from openviking.utils.ingest_options import IngestOptions
 from openviking_cli.utils import VikingURI
 from openviking_cli.utils.logger import get_logger
@@ -147,8 +148,6 @@ class SemanticDagExecutor:
         ctx: RequestContext,
         incremental_update: bool = False,
         target_uri: Optional[str] = None,
-        semantic_msg_id: Optional[str] = None,
-        telemetry_id: str = "",
         recursive: bool = True,
         lock: Optional[Dict[str, Any]] = None,
         is_code_repo: bool = False,
@@ -163,8 +162,6 @@ class SemanticDagExecutor:
         self._ctx = ctx
         self._incremental_update = incremental_update
         self._target_uri = target_uri
-        self._semantic_msg_id = semantic_msg_id
-        self._telemetry_id = telemetry_id
         self._recursive = recursive
         self._lock = lock
         self._is_code_repo = is_code_repo
@@ -174,6 +171,7 @@ class SemanticDagExecutor:
         self._coalesce_key = coalesce_key
         self._coalesce_version = coalesce_version
         self._task_context = get_task_context()
+        self._telemetry = get_current_telemetry()
         self._stale = False
         self._changed_paths = {
             path for key in ("added", "modified", "deleted") for path in self._changes.get(key, [])
@@ -209,11 +207,6 @@ class SemanticDagExecutor:
             await self._root_done.wait()
             if self._failure:
                 raise self._failure
-            if self._telemetry_id and self._semantic_msg_id:
-                get_request_wait_tracker().mark_semantic_done(
-                    self._telemetry_id,
-                    self._semantic_msg_id,
-                )
         except BaseException:
             self._closed = True
             await self._active_work_idle.wait()
@@ -302,15 +295,17 @@ class SemanticDagExecutor:
         return stats
 
     async def _run_work(self, work: DagWork) -> None:
-        if self._task_context is not None:
-            with bind_task_context(
+        task_context = (
+            bind_task_context(
                 self._task_context.task_id,
                 self._task_context.account_id,
                 self._task_context.user_id,
-            ):
-                await self._run_work_bound(work)
-            return
-        await self._run_work_bound(work)
+            )
+            if self._task_context is not None
+            else nullcontext()
+        )
+        with bind_telemetry(self._telemetry), task_context:
+            await self._run_work_bound(work)
 
     async def _run_work_bound(self, work: DagWork) -> None:
         self._mark_node_started()

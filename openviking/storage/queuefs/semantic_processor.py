@@ -437,8 +437,6 @@ class SemanticProcessor(DequeueHandlerBase):
                                 ctx=current_ctx,
                                 incremental_update=is_incremental,
                                 target_uri=target_uri,
-                                semantic_msg_id=msg.id,
-                                telemetry_id=msg.telemetry_id,
                                 recursive=msg.recursive,
                                 lock=semantic_lock.lock,
                                 is_code_repo=msg.is_code_repo,
@@ -458,6 +456,7 @@ class SemanticProcessor(DequeueHandlerBase):
                                 await self._enqueue_parent_refresh(msg, target_uri or msg.uri)
                     finally:
                         await semantic_lock.close()
+                    get_request_wait_tracker().mark_semantic_done(msg.telemetry_id, msg.id)
                     self._merge_request_stats(msg.telemetry_id, processed=1)
                     logger.info(f"Completed semantic generation for: {msg.uri}")
                     self.report_success()
@@ -566,11 +565,6 @@ class SemanticProcessor(DequeueHandlerBase):
         dir_uri = msg.uri
         ctx = ctx or self._default_ctx
         llm_sem = asyncio.Semaphore(self.max_concurrent_llm)
-        request_wait_tracker = get_request_wait_tracker()
-
-        def _mark_done() -> None:
-            if msg.telemetry_id and msg.id:
-                request_wait_tracker.mark_semantic_done(msg.telemetry_id, msg.id)
 
         try:
             entries = await viking_fs.ls(dir_uri, node_limit=LS_ALL_NODES, ctx=ctx)
@@ -588,7 +582,6 @@ class SemanticProcessor(DequeueHandlerBase):
 
         if not file_paths:
             logger.info(f"No memory files found in {dir_uri}")
-            _mark_done()
             return
 
         existing_summaries: Dict[str, str] = {}
@@ -706,13 +699,11 @@ class SemanticProcessor(DequeueHandlerBase):
         except Exception as e:
             raise RuntimeError(f"Failed to write abstract/overview for {dir_uri}: {e}") from e
         if not wrote_semantics:
-            _mark_done()
             return
         logger.info(f"Generated abstract.md and overview.md for {dir_uri}")
 
         if msg.skip_vectorization:
             logger.info(f"Skipping vectorization for {dir_uri} (requested via SemanticMsg)")
-            _mark_done()
             return
         await self._vectorize_directory(
             uri=dir_uri,
@@ -722,7 +713,6 @@ class SemanticProcessor(DequeueHandlerBase):
             ctx=ctx,
         )
         logger.info(f"Vectorized abstract.md and overview.md for {dir_uri}")
-        _mark_done()
 
     async def _write_memory_directory_semantics(
         self,
