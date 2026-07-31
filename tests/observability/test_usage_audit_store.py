@@ -582,3 +582,68 @@ async def test_context_heatmap_rebuckets_hour_for_shanghai(tmp_path):
         assert match["total"] == 1
     finally:
         await store.close()
+
+
+async def test_delete_user_data_purges_only_target_user_and_is_idempotent(tmp_path):
+    store = SQLiteUsageAuditStore(tmp_path / "usage.sqlite3")
+    await store.initialize()
+    try:
+        await store.record_batch(
+            [
+                _event(
+                    "vlm.call",
+                    {
+                        "provider": "p",
+                        "model_name": "m",
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                    },
+                    user_id="victim",
+                ),
+                _event(
+                    "http.request",
+                    {
+                        "request_id": "req-victim",
+                        "method": "POST",
+                        "route": "/api/v1/sessions/abc/messages",
+                        "status": "200",
+                        "duration_seconds": 0.1,
+                    },
+                    user_id="victim",
+                ),
+                _event(
+                    "vlm.call",
+                    {
+                        "provider": "p",
+                        "model_name": "m",
+                        "prompt_tokens": 9,
+                        "completion_tokens": 9,
+                    },
+                    user_id="sibling",
+                ),
+            ]
+        )
+
+        deleted = await store.delete_user_data(account_id="acct-1", user_id="victim")
+        assert sum(deleted.values()) >= 2
+        again = await store.delete_user_data(account_id="acct-1", user_id="victim")
+        assert sum(again.values()) == 0
+
+        conn = store._conn
+        assert conn is not None
+        assert conn.execute(
+            "SELECT COUNT(*) FROM usage_token_hourly "
+            "WHERE account_id = ? AND user_id = ?",
+            ("acct-1", "victim"),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COALESCE(SUM(token_count), 0) FROM usage_token_hourly "
+            "WHERE account_id = ? AND user_id = ?",
+            ("acct-1", "sibling"),
+        ).fetchone()[0] > 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM request_audit WHERE account_id = ? AND user_id = ?",
+            ("acct-1", "victim"),
+        ).fetchone()[0] == 0
+    finally:
+        await store.close()

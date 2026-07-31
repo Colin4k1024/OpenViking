@@ -103,6 +103,42 @@ class SQLiteUsageAuditStore:
             self._conn.close()
             self._conn = None
 
+    async def delete_user_data(
+        self, *, account_id: str, user_id: str
+    ) -> dict[str, int]:
+        """Delete all usage/audit rows for a (account, user) pair."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._delete_user_data_sync, account_id, user_id
+            )
+
+    def _delete_user_data_sync(self, account_id: str, user_id: str) -> dict[str, int]:
+        assert self._conn is not None
+        conn = self._conn
+        tables = (
+            "usage_token_hourly",
+            "usage_retrieval_hourly",
+            "usage_context_write_bucket",
+            "request_audit",
+        )
+        # Connection uses isolation_level=None (autocommit); wrap the multi-table
+        # purge in an explicit transaction so a failure mid-way rolls back
+        # instead of leaving a partially purged user (neither fully present nor
+        # fully deleted, which would break idempotent retry).
+        conn.execute("BEGIN")
+        try:
+            deleted: dict[str, int] = {}
+            for table in tables:
+                deleted[table] = conn.execute(
+                    f"DELETE FROM {table} WHERE account_id = ? AND user_id = ?",
+                    (account_id, user_id),
+                ).rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return deleted
+
     async def record_batch(self, events: Sequence[ObservabilityEvent]) -> None:
         if not events:
             return

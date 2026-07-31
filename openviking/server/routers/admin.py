@@ -30,6 +30,7 @@ from openviking.service.task_tracker import (
 from openviking.storage.viking_fs import get_viking_fs
 from openviking_cli.exceptions import (
     FailedPreconditionError,
+    InternalError,
     InvalidArgumentError,
     PermissionDeniedError,
 )
@@ -367,9 +368,86 @@ async def remove_user(
     user_id: str = Path(..., description="User ID"),
     ctx: RequestContext = Depends(get_request_context),
 ):
-    """Remove a user from an account."""
+    """Remove a user and cascade-delete all their data.
+
+    The deletion fails closed: every *configured* cleanup stage must succeed
+    before the user credential/registry entry is removed. If a configured
+    subsystem fails, the request returns an error and the user stays
+    registered so the caller can retry; partial cleanup is idempotent because
+    each stage (AGFS rm, owner-filtered vector delete, OAuth revocation, and
+    usage/audit purge) treats already-removed data as a no-op. An *absent*
+    optional subsystem (no vector store attached, OAuth/usage disabled) is
+    skipped rather than treated as a failure.
+    """
     _check_account_access(ctx, account_id)
     manager = _get_api_key_manager(request)
+
+    # Build a ROOT-level context scoped to the target user for cleanup.
+    cleanup_ctx = RequestContext(
+        user=UserIdentifier(account_id, user_id),
+        role=Role.ROOT,
+    )
+
+    viking_fs = get_viking_fs()
+    failures: list[str] = []
+
+    # Remove AGFS data under the user's subtree. A missing subtree is a
+    # successful no-op (rm is idempotent); any other error aborts deletion.
+    user_prefix = f"viking://user/{user_id}/"
+    try:
+        await viking_fs.rm(user_prefix, recursive=True, ctx=cleanup_ctx)
+    except Exception as e:
+        failures.append(f"agfs: {e}")
+        logger.warning(f"AGFS cleanup failed for {account_id}/{user_id}: {e}")
+
+    # Remove VectorDB records owned by the user. The vector store is an
+    # optional backend exposed publicly as viking_fs.vector_store; absent
+    # backend => disabled => skip, present but failing => abort. viking_fs.rm
+    # already prunes vectors under the removed URI subtree; this owner-filtered
+    # pass also catches orphan records that live outside the subtree.
+    storage = getattr(viking_fs, "vector_store", None)
+    if storage is not None:
+        try:
+            deleted = await storage.delete_user_data(account_id, user_id)
+            logger.info(
+                f"VectorDB cascade delete for user {account_id}/{user_id}: {deleted} records"
+            )
+        except Exception as e:
+            failures.append(f"vectordb: {e}")
+            logger.warning(f"VectorDB cleanup failed for {account_id}/{user_id}: {e}")
+
+    # Revoke OAuth tokens/codes. Absent OAuth store => disabled => skip.
+    oauth_store = getattr(request.app.state, "oauth_store", None)
+    if oauth_store is not None:
+        try:
+            await oauth_store.revoke_user_tokens(
+                account_id=account_id, user_id=user_id
+            )
+        except Exception as e:
+            failures.append(f"oauth: {e}")
+            logger.warning(f"OAuth cleanup failed for {account_id}/{user_id}: {e}")
+
+    # Purge usage/audit rows. Absent runtime => disabled => skip.
+    usage_runtime = getattr(request.app.state, "usage_audit_runtime", None)
+    if usage_runtime is not None and getattr(usage_runtime, "store", None) is not None:
+        try:
+            await usage_runtime.store.delete_user_data(
+                account_id=account_id, user_id=user_id
+            )
+        except Exception as e:
+            failures.append(f"usage_audit: {e}")
+            logger.warning(
+                f"Usage/audit cleanup failed for {account_id}/{user_id}: {e}"
+            )
+
+    if failures:
+        # Keep the user registered so deletion can be retried safely.
+        raise InternalError(
+            f"User cleanup failed for {account_id}/{user_id}; user remains registered. "
+            "Retry after resolving: " + "; ".join(failures),
+        )
+
+    # All configured cleanups succeeded; only now remove the registry entry.
     await manager.remove_user(account_id, user_id)
     return Response(status="ok", result={"deleted": True})
 
