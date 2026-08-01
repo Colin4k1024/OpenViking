@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,6 +17,10 @@ class _FakeVikingFS:
         self._tree = {self._norm(k): v for k, v in tree.items()}
         self._file_contents = {self._norm(k): v for k, v in file_contents.items()}
         self.writes = []
+        self._async_agfs = SimpleNamespace(
+            pathlock_acquire_exact_batch=AsyncMock(return_value={}),
+            pathlock_release=AsyncMock(),
+        )
 
     def _norm(self, path):
         if "://" not in path:
@@ -34,7 +39,8 @@ class _FakeVikingFS:
     async def read_file(self, path, ctx=None):
         return self._file_contents.get(self._norm(path), "")
 
-    async def write_file(self, path, content, ctx=None):
+    async def write_file(self, path, content, ctx=None, **kwargs):
+        del kwargs
         norm_path = self._norm(path)
         self._file_contents[norm_path] = content
         self.writes.append((norm_path, content))

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,12 +23,17 @@ class _FakeVikingFS:
     def __init__(self, tree):
         self._tree = tree
         self.writes = []
+        self._async_agfs = SimpleNamespace(
+            pathlock_acquire_exact_batch=AsyncMock(return_value={}),
+            pathlock_release=AsyncMock(),
+        )
 
     async def ls(self, uri, node_limit=None, ctx=None):
         del node_limit
         return self._tree.get(uri, [])
 
-    async def write_file(self, path, content, ctx=None, lock_handle=None):
+    async def write_file(self, path, content, ctx=None, **kwargs):
+        del kwargs
         self.writes.append((path, content))
 
     def _uri_to_path(self, uri, ctx=None):
@@ -52,8 +59,9 @@ class _FakeProcessor:
         return overview, "abstract"
 
     async def _vectorize_directory(
-        self, uri, context_type, abstract, overview, ctx=None, semantic_msg_id=None
+        self, uri, context_type, abstract, overview, ctx=None, semantic_msg_id=None, **kwargs
     ):
+        del kwargs
         self.vectorized_dirs.append(uri)
 
     async def _vectorize_single_file(
@@ -65,7 +73,9 @@ class _FakeProcessor:
         ctx=None,
         semantic_msg_id=None,
         use_summary=False,
+        **kwargs,
     ):
+        del kwargs
         self.vectorized_files.append(file_path)
 
     async def _vectorize_directory_simple(self, uri, context_type, abstract, overview, ctx=None):

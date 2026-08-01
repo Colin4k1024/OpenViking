@@ -17,7 +17,7 @@ class RecordingVLM:
     """VLM mock that records every prompt sent to get_completion_async."""
 
     def __init__(self, response: str = "summary response"):
-        self.prompts = []
+        self.prompts: list[str] = []
         self._response = response
 
     def is_available(self):
@@ -179,7 +179,7 @@ PROMPT_LEN = 40  # fixed prompt length used in tests with patched render_prompt
 
 
 @pytest.mark.asyncio
-async def test_text_summary_budget_exact_accounting_and_skipping(monkeypatch, caplog):
+async def test_text_summary_budget_exact_accounting_and_skipping(monkeypatch):
     """File summaries charge exact rendered-prompt length; over-budget calls skip VLM.
 
     Proves:
@@ -188,8 +188,6 @@ async def test_text_summary_budget_exact_accounting_and_skipping(monkeypatch, ca
       (vectorization still works)
     - Exactly one warning per task (not per rejected call), with limit/requested/remaining
     """
-    import logging
-
     vlm = RecordingVLM()
     config = _make_config(vlm)
     _patch_config(monkeypatch, config)
@@ -214,16 +212,22 @@ async def test_text_summary_budget_exact_accounting_and_skipping(monkeypatch, ca
     BUDGET = PROMPT_LEN * 3  # exactly 3 calls fit
     budget = SummaryBudget(BUDGET)
 
-    with caplog.at_level(logging.WARNING, logger="openviking"):
-        results = []
-        for i in range(5):
-            result = await processor._generate_text_summary(
-                f"viking://resources/test/file{i}.txt",
-                f"file{i}.txt",
-                asyncio.Semaphore(1),
-                summary_budget=budget,
-            )
-            results.append(result)
+    warnings = []
+
+    def capture_warning(message, *args):
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(semantic_processor_module.logger, "warning", capture_warning)
+
+    results = []
+    for i in range(5):
+        result = await processor._generate_text_summary(
+            f"viking://resources/test/file{i}.txt",
+            f"file{i}.txt",
+            asyncio.Semaphore(1),
+            summary_budget=budget,
+        )
+        results.append(result)
 
     # Exactly 3 calls fit in the budget
     assert len(vlm.prompts) == 3
@@ -237,14 +241,9 @@ async def test_text_summary_budget_exact_accounting_and_skipping(monkeypatch, ca
     # Budget is exactly exhausted
     assert budget.remaining == 0
     assert budget.exhausted is True
-    # Exactly one warning for 2 consecutive rejections, with numeric details
-    warning_records = [r for r in caplog.records if "VLM summary input limit" in r.message]
-    assert len(warning_records) == 1, (
-        f"Expected exactly 1 budget warning, got {len(warning_records)}: "
-        f"{[r.message for r in warning_records]}"
-    )
-    assert str(BUDGET) in warning_records[0].message  # limit
-    assert str(PROMPT_LEN) in warning_records[0].message  # requested
+    assert len(warnings) == 1
+    assert str(BUDGET) in warnings[0]
+    assert str(PROMPT_LEN) in warnings[0]
 
 
 @pytest.mark.asyncio
@@ -255,8 +254,7 @@ async def test_text_summary_ast_only_does_not_consume_budget(monkeypatch):
     config.code.code_summary_mode = "ast"
     _patch_config(monkeypatch, config)
 
-    # 200-line file triggers AST path
-    content = "\n".join([f"line {i}" for i in range(200)])
+    content = "def helper():\n    return 1\n\nclass Service:\n    def run(self):\n        return helper()\n"
     mock_fs = MagicMock()
     mock_fs.read_file = AsyncMock(return_value=content)
     monkeypatch.setattr(
