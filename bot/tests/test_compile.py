@@ -1932,6 +1932,47 @@ class _NamedTool(_EchoTool):
         return self._name
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uri", "expected_path"),
+    [
+        ("skills/wiki/references/guide.md", "skills/wiki/references/guide.md"),
+        ("viking://skills/wiki/references/guide.md", "skills/wiki/references/guide.md"),
+    ],
+)
+async def test_scoped_tool_redirects_skill_workspace_reads(uri, expected_path):
+    wrapped = CompileScopedTool(
+        _NamedTool("openviking_multi_read"),
+        roots=("viking://resources/source",),
+        limits=CompileLimits(),
+        result_budget={"bytes": 0},
+        budget_lock=asyncio.Lock(),
+    )
+
+    result = await wrapped.execute(ToolContext(), uris=[uri])
+
+    assert "read_file" in result
+    assert expected_path in result
+
+
+@pytest.mark.asyncio
+async def test_scoped_tool_keeps_normal_scope_errors_and_valid_reads():
+    wrapped = CompileScopedTool(
+        _NamedTool("openviking_multi_read"),
+        roots=("viking://resources/source",),
+        limits=CompileLimits(),
+        result_budget={"bytes": 0},
+        budget_lock=asyncio.Lock(),
+    )
+
+    rejected = await wrapped.execute(ToolContext(), uris=["viking://resources/other/file.md"])
+    accepted = await wrapped.execute(ToolContext(), uris=["viking://resources/source/file.md"])
+
+    assert "outside the Compile task scope" in rejected
+    assert "read_file" not in rejected
+    assert "viking://resources/source/file.md" in accepted
+
+
 @pytest.mark.parametrize("exec_enabled", [True, False])
 def test_compile_registry_has_a_fixed_ara_compatible_tool_set(exec_enabled):
     available = ToolRegistry()
@@ -2009,6 +2050,7 @@ def test_compile_prompt_routes_skill_cli_commands_through_exec():
 
     system, user = BotCompileService._build_prompts(
         request=request,
+        skill_name="ara",
         skill_content="Follow the ARA method.",
         sources=[],
         catalog=[],
@@ -2016,6 +2058,8 @@ def test_compile_prompt_routes_skill_cli_commands_through_exec():
     )
 
     assert "When the Skill asks to run Bash, shell commands, or a CLI, use the exec tool." in system
+    assert "`skills/ara/`" in system
+    assert "resolve its relative paths there and use read_file" in system
     assert "Generate every artifact file in the task workspace with write_file or exec" in system
     assert "submit_wiki_bundle using workspace_path" in system
     assert "never inline artifact content" in system
@@ -2052,6 +2096,7 @@ def test_compile_prompt_omits_exec_when_capability_is_disabled():
 
     system, _user = BotCompileService._build_prompts(
         request=request,
+        skill_name="wiki",
         skill_content="Write two Wiki pages.",
         sources=[],
         catalog=[],
@@ -2080,6 +2125,7 @@ def test_compile_prompt_requires_one_complete_skill_package_without_exec():
 
     system, user = BotCompileService._build_prompts(
         request=request,
+        skill_name="skill-creator",
         skill_content="Create a standards-compliant Skill.",
         sources=[],
         catalog=[],
