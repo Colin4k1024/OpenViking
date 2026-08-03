@@ -139,7 +139,7 @@ data: {"event":"response","data":{"content":"当前知识库包含……","respo
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `from` | string[] | 是 | - | 一个或多个来源目录 |
-| `to` | string | 是 | - | 目标 Resource 或 Memory 目录，或受支持的 Skill namespace |
+| `to` | string | 是 | - | 目标 Resource 目录、Memory 根目录或其后代目录，或受支持的 Skill namespace |
 | `skill` | string | 是 | - | Skill 目录或其 `SKILL.md` URI |
 | `reason` | string | 否 | Skill 驱动的默认值 | 本次 Compile 的补充指令 |
 
@@ -173,6 +173,9 @@ ov compile \
 ```
 
 `--wait` 会轮询状态接口，直到任务进入终态。`--timeout` 只限制本地等待时间，不会取消服务端任务。
+
+重复传入的 `--from` 会由同一个 AgentLoop 联合处理。Memory target 本身也会通过 target
+catalog 和受限只读工具提供给 Skill，因此做增量整理时不需要再把它重复写入 `--from`。
 
 `direct` backend 会以 Bot 宿主机权限执行 Compile 的 `exec` 命令。`bot.sandbox.backends.direct.allow_compile_exec` 默认为 `false`，此时 Compile 不会暴露 `exec`，但普通 Wiki 和产物文件整理仍可通过文件工具运行。声明了 `requires.bins` 或 `requires.env` 的 Skill 会在执行任何命令探测前以 `SKILL_CAPABILITY_UNAVAILABLE` 失败。将该选项设为 `true` 是明确的不安全 opt-in；依赖 CLI 的 Skill 推荐使用具备文件系统和网络策略的隔离 backend。超过 admission 上限时返回 `429 RESOURCE_EXHAUSTED`。
 
@@ -227,11 +230,26 @@ curl http://localhost:1933/bot/v1/compile/cmp_01abc \
       "unchanged": [],
       "page_count": 1,
       "link_count": 0,
+      "token_usage": {
+        "input_tokens": 1200,
+        "output_tokens": 300,
+        "cache_tokens": 800,
+        "reasoning_tokens": 50,
+        "llm_total_tokens": 1500,
+        "embedding_tokens": 120,
+        "total_tokens": 1620
+      },
+      "iterations": 4,
+      "duration_seconds": 12.4,
       "warnings": []
     }
   }
 }
 ```
+
+`cache_tokens` 和 `reasoning_tokens` 是模型用量的明细，不会再次累加；
+`total_tokens = llm_total_tokens + embedding_tokens`。其中 embedding 统计覆盖
+Compile 执行的目标记忆检索，以及同步目标写入和索引刷新。
 
 任务生命周期如下：
 

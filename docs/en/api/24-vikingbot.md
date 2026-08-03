@@ -142,7 +142,7 @@ Start an asynchronous, Skill-driven Compile task. VikingBot loads the selected S
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `from` | string[] | Yes | - | One or more source directories |
-| `to` | string | Yes | - | Target Resource or Memory directory, or a supported Skill namespace |
+| `to` | string | Yes | - | Target Resource directory, Memory root or descendant, or a supported Skill namespace |
 | `skill` | string | Yes | - | Skill directory or its `SKILL.md` URI |
 | `reason` | string | No | Skill-driven default | Additional instructions for this Compile run |
 
@@ -176,6 +176,10 @@ ov compile \
 ```
 
 `--wait` polls the status endpoint until the task reaches a terminal state. `--timeout` limits only the local wait and does not cancel the server task.
+
+Repeated `--from` values are processed by one AgentLoop. A Memory target is also available
+to the selected Skill through the target catalog and scoped read tools, so it does not need
+to be repeated as a source for incremental consolidation.
 
 The `direct` backend runs Compile `exec` commands with the Bot host's permissions. `bot.sandbox.backends.direct.allow_compile_exec` defaults to `false`, so Compile omits `exec` while ordinary Wiki and artifact generation can still run through file tools. A Skill that declares `requires.bins` or `requires.env` fails with `SKILL_CAPABILITY_UNAVAILABLE` before any command probe runs. Setting the option to `true` is an explicit unsafe opt-in; isolated backends with filesystem and network policies are recommended for CLI-dependent Skills. Admission overflow returns `429 RESOURCE_EXHAUSTED`.
 
@@ -230,11 +234,27 @@ curl http://localhost:1933/bot/v1/compile/cmp_01abc \
       "unchanged": [],
       "page_count": 1,
       "link_count": 0,
+      "token_usage": {
+        "input_tokens": 1200,
+        "output_tokens": 300,
+        "cache_tokens": 800,
+        "reasoning_tokens": 50,
+        "llm_total_tokens": 1500,
+        "embedding_tokens": 120,
+        "total_tokens": 1620
+      },
+      "iterations": 4,
+      "duration_seconds": 12.4,
       "warnings": []
     }
   }
 }
 ```
+
+`cache_tokens` and `reasoning_tokens` are breakdowns of model usage and are not
+added again. `total_tokens` is `llm_total_tokens + embedding_tokens`; the embedding
+count covers target-memory retrieval plus the synchronous write/index refresh performed
+by Compile.
 
 Task lifecycle values are:
 

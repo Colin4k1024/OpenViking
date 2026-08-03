@@ -228,12 +228,28 @@ GET /bot/v1/compile/{task_id}
     "unchanged": [],
     "page_count": 1,
     "link_count": 0,
+    "token_usage": {
+      "input_tokens": 1200,
+      "output_tokens": 300,
+      "cache_tokens": 800,
+      "reasoning_tokens": 50,
+      "llm_total_tokens": 1500,
+      "embedding_tokens": 120,
+      "total_tokens": 1620
+    },
+    "iterations": 4,
+    "duration_seconds": 12.4,
     "warnings": []
   }
 }
 ```
 
 任务只能由创建它的用户查询。
+
+`token_usage` 合并 AgentLoop 的模型调用、目标检索以及同步 batch-write/index
+refresh 的 telemetry。cache/reasoning 是明细，不重复计入总量；`total_tokens` 等于
+`llm_total_tokens + embedding_tokens`。`duration_seconds` 是任务开始执行到完成
+写入的服务端耗时，不含队列等待。
 
 失败结果使用同一查询接口返回稳定结构：
 
@@ -566,8 +582,8 @@ v1 先使用集中定义、可测试的 `CompileLimits`，不把常量散落在 
 | initial prompt characters | 200,000 |
 | tool URI count / 单次结果 / 任务累计结果 | 32 / 1 MiB / 8 MiB |
 | output pages / 最终总大小 | 64 / 4 MiB |
-| concurrent Compile tasks / task runtime | 2 / 30 min |
-| accepted tasks（全局 / 单 principal）/ queue wait | 16 / 4 / 5 min |
+| concurrent Compile tasks / task runtime | 10 / 30 min |
+| accepted tasks（全局 / 单 principal）/ queue wait | 16 / 10 / 5 min |
 | terminal task retention / records | 24 h / 1,000 |
 
 OpenViking batch-write 自己还要设置独立的 request 上限，至少覆盖 Compile 的 64 pages / 4 MiB，但不能信任 Bot 已经做过限制。超限统一返回 `RESOURCE_EXHAUSTED`。
