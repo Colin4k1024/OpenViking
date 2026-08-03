@@ -870,7 +870,7 @@ const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     },
     CommandHelpSpec {
         path: &["compile"],
-        purpose: "Use a required VikingBot Skill to compile OpenViking materials into Wiki pages or a Skill package.",
+        purpose: "Use a required VikingBot Skill to compile OpenViking materials into Resource/Memory Wiki pages or a Skill package.",
         examples: &[
             HelpItem {
                 label: "ov compile --from viking://resources/weekly --to viking://resources/wiki --skill viking://agent/skills/monthly_wiki --wait",

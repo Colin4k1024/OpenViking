@@ -140,6 +140,12 @@ pub struct CompileResult {
     pub page_count: usize,
     pub link_count: usize,
     #[serde(default)]
+    pub token_usage: std::collections::HashMap<String, u64>,
+    #[serde(default)]
+    pub iterations: usize,
+    #[serde(default)]
+    pub duration_seconds: f64,
+    #[serde(default)]
     pub warnings: Vec<String>,
 }
 

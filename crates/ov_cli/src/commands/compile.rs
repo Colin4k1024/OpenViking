@@ -121,6 +121,9 @@ fn render_completed(value: &CompileTaskStatus, format: OutputFormat, compact: bo
             unchanged: Vec::new(),
             page_count: 0,
             link_count: 0,
+            token_usage: Default::default(),
+            iterations: 0,
+            duration_seconds: 0.0,
             warnings: Vec::new(),
         });
     println!("to: {}", result.to);
@@ -129,6 +132,12 @@ fn render_completed(value: &CompileTaskStatus, format: OutputFormat, compact: bo
     println!("unchanged: {}", result.unchanged.len());
     println!("page_count: {}", result.page_count);
     println!("link_count: {}", result.link_count);
+    println!(
+        "total_tokens: {}",
+        result.token_usage.get("total_tokens").unwrap_or(&0)
+    );
+    println!("iterations: {}", result.iterations);
+    println!("duration_seconds: {:.3}", result.duration_seconds);
     for warning in result.warnings {
         eprintln!("warning: {warning}");
     }
