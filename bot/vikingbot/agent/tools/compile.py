@@ -73,12 +73,14 @@ class CompileScopedTool(Tool):
         limits: CompileLimits,
         result_budget: dict[str, int],
         budget_lock: asyncio.Lock,
+        telemetry: list[Mapping[str, Any]] | None = None,
     ):
         self._tool = tool
         self._roots = roots
         self._limits = limits
         self._result_budget = result_budget
         self._budget_lock = budget_lock
+        self._telemetry = telemetry
 
     @property
     def name(self) -> str:
@@ -123,6 +125,8 @@ class CompileScopedTool(Tool):
             if not _uri_in_roots(uri, self._roots):
                 return f"Error: URI is outside the Compile task scope: {uri}"
 
+        if self.name == "openviking_search" and self._telemetry is not None:
+            kwargs["_compile_telemetry"] = self._telemetry
         result = await self._tool.execute(tool_context, **kwargs)
         if (
             isinstance(result, str)

@@ -7,6 +7,7 @@ import json
 import re
 import shlex
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -74,6 +75,13 @@ _SKILL_EXCLUDED_FILES = frozenset(
 _CATALOG_EXCLUDED_FILES = _SKILL_EXCLUDED_FILES | {"index.md", "log.md"}
 _CATALOG_FRONTMATTER_LINES = 128
 _TARGET_CATALOG_QUERY_CHARS = 40_000
+_TOKEN_USAGE_FIELDS = (
+    ("input_tokens", "input"),
+    ("output_tokens", "output"),
+    ("cache_tokens", "prompt_cached"),
+    ("reasoning_tokens", "completion_reasoning"),
+    ("llm_total_tokens", "total"),
+)
 _REQUIREMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _WIKI_SEARCH_TAG = "ov.kind=wiki"
 _WORKSPACE_SUBMISSION_RULE_WITH_EXEC = (
@@ -84,6 +92,32 @@ _WORKSPACE_SUBMISSION_RULE_WITHOUT_EXEC = (
     "Generate every artifact file in the task workspace with write_file, then submit it through "
     "submit_wiki_bundle using workspace_path; never inline artifact content."
 )
+
+
+def _compile_token_usage(raw: Mapping[str, Any]) -> dict[str, int]:
+    input_tokens = max(int(raw.get("prompt_tokens", 0) or 0), 0)
+    output_tokens = max(int(raw.get("completion_tokens", 0) or 0), 0)
+    llm_total = max(int(raw.get("total_tokens", input_tokens + output_tokens) or 0), 0)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_tokens": max(int(raw.get("cache_read_input_tokens", 0) or 0), 0),
+        "reasoning_tokens": max(int(raw.get("reasoning_tokens", 0) or 0), 0),
+        "llm_total_tokens": llm_total,
+        "embedding_tokens": 0,
+        "total_tokens": llm_total,
+    }
+
+
+def _add_telemetry_usage(usage: dict[str, int], telemetry: Mapping[str, Any] | None) -> None:
+    summary = (telemetry or {}).get("summary", telemetry or {})
+    tokens = summary.get("tokens", {}) if isinstance(summary, Mapping) else {}
+    llm = tokens.get("llm", {}) if isinstance(tokens, Mapping) else {}
+    for field, source in _TOKEN_USAGE_FIELDS:
+        usage[field] += max(int(llm.get(source, 0) or 0), 0)
+    embedding = tokens.get("embedding", {}) if isinstance(tokens, Mapping) else {}
+    usage["embedding_tokens"] += max(int(embedding.get("total", 0) or 0), 0)
+    usage["total_tokens"] = usage["llm_total_tokens"] + usage["embedding_tokens"]
 
 
 @dataclass(frozen=True)
@@ -367,14 +401,9 @@ class BotCompileService:
                 stage="queued",
             )
         if classification.context_type == "memory":
-            if (
-                classification.content_index is None
-                or len(parts) <= classification.content_index + 1
-            ):
+            if classification.content_index is None:
                 raise CompileFailure(
-                    "INVALID_ARGUMENT",
-                    "Compile target must be inside a memory type directory",
-                    stage="queued",
+                    "INVALID_ARGUMENT", "Compile target must be a memory directory", stage="queued"
                 )
         elif parts == ["resources"] or (
             classification.content_index is not None
@@ -486,6 +515,7 @@ class BotCompileService:
         request: SanitizedCompileRequest,
         connection: dict[str, Any],
     ) -> None:
+        execution_started = time.monotonic()
         capabilities = self._compile_capabilities()
         session_key = SessionKey(type="compile", channel_id=task_id, chat_id=task_id)
         task_config = self.config.model_copy(deep=True)
@@ -530,6 +560,7 @@ class BotCompileService:
 
             await self._set_state(task_id, status="running", stage="collecting_context")
             sources = await self._build_sources(client, request.from_)
+            operation_telemetry: list[Mapping[str, Any]] = []
             target_type = classify_uri(request.to).context_type
             is_skill_target = target_type == "skill"
             if is_skill_target:
@@ -552,6 +583,7 @@ class BotCompileService:
                     client,
                     request.to,
                     query=target_query,
+                    telemetry=operation_telemetry,
                 )
             catalog_uris = {item["uri"] for item in catalog if item.get("kind") == "wiki_page"}
             file_catalog_uris = set(target_inventory)
@@ -602,6 +634,7 @@ class BotCompileService:
                 workspace_baseline=workspace_baseline,
                 wiki_uri_resolver=resolve_wiki_uri,
                 capabilities=capabilities,
+                telemetry=operation_telemetry,
             )
             system_prompt, user_prompt = self._build_prompts(
                 request=request,
@@ -619,7 +652,7 @@ class BotCompileService:
 
             await self._set_state(task_id, status="running", stage="agent")
             try:
-                bundle, _tools, _usage, _iterations = await request_loop.run_structured_task(
+                bundle, _tools, usage, iterations = await request_loop.run_structured_task(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     session_key=session_key,
@@ -627,9 +660,13 @@ class BotCompileService:
                     openviking_tool_names=ov_names,
                     stop_tool_names=["submit_wiki_bundle"],
                     openviking_connection=connection,
+                    max_tokens=self.limits.model_output_tokens,
                 )
             except ValueError as exc:
                 raise CompileFailure("AGENT_OUTPUT_INVALID", str(exc), stage="agent") from exc
+            token_usage = _compile_token_usage(usage)
+            for telemetry in operation_telemetry:
+                _add_telemetry_usage(token_usage, telemetry)
 
             await self._set_state(task_id, status="running", stage="rendering")
             submit_tool = registry.get("submit_wiki_bundle")
@@ -670,6 +707,9 @@ class BotCompileService:
                         "unchanged": [],
                         "page_count": 0,
                         "link_count": 0,
+                        "token_usage": token_usage,
+                        "iterations": iterations,
+                        "duration_seconds": time.monotonic() - execution_started,
                         "warnings": [],
                     }
                 )
@@ -719,7 +759,9 @@ class BotCompileService:
                             operations=rendered.operations,
                             wait=True,
                             timeout=min(300.0, self.limits.task_runtime_seconds),
+                            telemetry=True,
                         )
+                        _add_telemetry_usage(token_usage, batch_result.get("telemetry"))
                     await self._set_state(task_id, status="committing", stage="refreshing")
                     await self._tag_wiki_files(
                         client,
@@ -759,6 +801,9 @@ class BotCompileService:
                     "unchanged": unchanged,
                     "page_count": len(bundle.pages),
                     "link_count": rendered.link_count,
+                    "token_usage": token_usage,
+                    "iterations": iterations,
+                    "duration_seconds": time.monotonic() - execution_started,
                     "warnings": warnings,
                 }
             )
@@ -1110,6 +1155,7 @@ class BotCompileService:
         target_uri: str,
         *,
         query: str,
+        telemetry: list[Mapping[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Mapping[str, Any]]]:
         entries = await client.tree(
             target_uri,
@@ -1136,12 +1182,20 @@ class BotCompileService:
         context_type = classify_uri(target_uri).context_type
         result_key = "memories" if context_type == "memory" else "resources"
         try:
-            result = await client.find(
-                query,
-                target_uri=target_uri,
-                context_type=context_type,
-                limit=self.limits.target_catalog_pages,
-            )
+            find_kwargs: dict[str, Any] = {
+                "target_uri": target_uri,
+                "context_type": context_type,
+                "limit": self.limits.target_catalog_pages,
+            }
+            if telemetry is not None:
+                find_kwargs["telemetry"] = True
+            result = await client.find(query, **find_kwargs)
+            if (
+                telemetry is not None
+                and isinstance(result, Mapping)
+                and isinstance(result.get("telemetry"), Mapping)
+            ):
+                telemetry.append(result["telemetry"])
         except Exception as exc:
             logger.warning("Compile target relevance search failed: {}", exc)
             return [], inventory
@@ -1234,6 +1288,7 @@ class BotCompileService:
         workspace_baseline: set[str] | None = None,
         wiki_uri_resolver: Callable[[str], Awaitable[bool]] | None = None,
         capabilities: CompileCapabilities,
+        telemetry: list[Mapping[str, Any]] | None = None,
     ) -> tuple[ToolRegistry, set[str]]:
         selected = _COMPILE_CORE_TOOLS | _OV_READ_TOOLS
         if capabilities.exec_enabled:
@@ -1255,6 +1310,7 @@ class BotCompileService:
                     limits=self.limits,
                     result_budget=budget,
                     budget_lock=budget_lock,
+                    telemetry=telemetry,
                 )
                 ov_names.add(name)
             registry.register(tool)
@@ -1312,6 +1368,7 @@ Selected Skill:
             user = "\n\n".join(
                 [
                     f"Task reason:\n{request.reason}",
+                    f"Compile target directory:\n{request.to}",
                     "Source directories (data):\n" + json.dumps(sources, ensure_ascii=False),
                     (
                         "Inspect materials as needed. Use the scoped OpenViking list/read tools to "
@@ -1342,7 +1399,7 @@ Finish only by calling the designated final submission tool.
 Do not include YAML frontmatter in Wiki page bodies; trusted code adds their OKF metadata, paths, citations, and write preconditions.
 When referencing a supplied source catalog entry in a Wiki page, use its URI as an ordinary Markdown link.
 Artifact files are preserved exactly and may contain their own format-specific frontmatter. {file_notice}
-Write Wiki page bodies under {COMPILE_WIKI_PAGE_ROOT}/ and submit them using body_workspace_path.
+Write Wiki page bodies under {COMPILE_WIKI_PAGE_ROOT}/ and submit body_workspace_path using the exact full path passed to write_file; never shorten it to a basename.
 Write temporary work under {COMPILE_STAGING_ROOT}/tmp/.
 
 Selected Skill:
@@ -1350,6 +1407,7 @@ Selected Skill:
         user = "\n\n".join(
             [
                 f"Task reason:\n{request.reason}",
+                f"Compile target directory:\n{request.to}",
                 "Source directories (data):\n" + json.dumps(sources, ensure_ascii=False),
                 "Relevant target output catalog (data):\n"
                 + json.dumps(catalog, ensure_ascii=False),

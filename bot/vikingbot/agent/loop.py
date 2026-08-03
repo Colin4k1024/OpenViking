@@ -274,6 +274,7 @@ class AgentLoop:
         tools: list[dict[str, Any]],
         session_key: SessionKey,
         publish_events: bool,
+        max_tokens: int = 4096,
     ) -> tuple[Any, bool, bool]:
         """Call the provider and forward native stream deltas to the bus."""
         streamed_content = False
@@ -284,6 +285,7 @@ class AgentLoop:
             messages=messages,
             tools=tools,
             model=self.model,
+            max_tokens=max_tokens,
             temperature=self.temperature,
             session_id=session_key.safe_name(),
         ):
@@ -317,6 +319,7 @@ class AgentLoop:
                 messages=messages,
                 tools=tools,
                 model=self.model,
+                max_tokens=max_tokens,
                 temperature=self.temperature,
                 session_id=session_key.safe_name(),
             )
@@ -928,6 +931,7 @@ class AgentLoop:
         openviking_tool_names: list[str] | set[str] | None = None,
         allow_final_fallback: bool = True,
         inject_write_experience: bool = True,
+        max_tokens: int = 4096,
     ) -> tuple[str | None, str | None, list[dict], dict[str, int], int]:
         """
         Run the core agent loop: call LLM, execute tools, repeat until done.
@@ -964,6 +968,7 @@ class AgentLoop:
                 tool-use iteration limit is reached.
             inject_write_experience: Whether to retrieve and inject relevant agent experience
                 before executing configured write tools.
+            max_tokens: Maximum completion tokens for each LLM turn.
 
         Returns:
             tuple of (final_content, final_reasoning_content, tools_used, token_usage, iteration)
@@ -979,6 +984,8 @@ class AgentLoop:
         token_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "reasoning_tokens": 0,
             "total_tokens": 0,
         }
         write_exp_injected = False
@@ -990,6 +997,10 @@ class AgentLoop:
             cur_token = response.usage
             token_usage["prompt_tokens"] += cur_token.get("prompt_tokens", 0)
             token_usage["completion_tokens"] += cur_token.get("completion_tokens", 0)
+            token_usage["cache_read_input_tokens"] += cur_token.get(
+                "cache_read_input_tokens", 0
+            )
+            token_usage["reasoning_tokens"] += cur_token.get("reasoning_tokens", 0)
             token_usage["total_tokens"] += cur_token.get("total_tokens", 0)
 
         while iteration < self.max_iterations:
@@ -1013,6 +1024,7 @@ class AgentLoop:
                 tools=tool_definitions,
                 session_key=session_key,
                 publish_events=publish_events,
+                max_tokens=max_tokens,
             )
             accumulate_token_usage(response)
 
@@ -1264,6 +1276,7 @@ class AgentLoop:
                     tools=[],
                     session_key=session_key,
                     publish_events=publish_events,
+                    max_tokens=max_tokens,
                 )
                 accumulate_token_usage(response)
                 final_content = response.content
@@ -1299,6 +1312,7 @@ class AgentLoop:
         openviking_tool_names: list[str] | set[str],
         stop_tool_names: list[str],
         openviking_connection: dict[str, Any] | None,
+        max_tokens: int = 4096,
     ) -> tuple[Any, list[dict], dict[str, int], int]:
         """Run a tool-terminated structured task through the existing agent loop."""
 
@@ -1331,6 +1345,7 @@ class AgentLoop:
             openviking_tool_names=openviking_tool_names,
             allow_final_fallback=False,
             inject_write_experience=False,
+            max_tokens=max_tokens,
         )
         submit_tool = tool_registry.get("submit_wiki_bundle")
         bundle = getattr(submit_tool, "bundle", None)

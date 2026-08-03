@@ -414,6 +414,7 @@ class VikingSearchTool(OVFileTool):
     ) -> str:
         client = None
         try:
+            compile_telemetry = kwargs.get("_compile_telemetry")
             client = await self._get_client(tool_context)
             memory_owner_user_ids = getattr(tool_context, "memory_owner_user_ids", None)
             legacy_memory_user_ids = getattr(tool_context, "memory_user_ids", None)
@@ -480,7 +481,15 @@ class VikingSearchTool(OVFileTool):
                 }
                 if search_user_id:
                     search_kwargs["user_id"] = search_user_id
+                if compile_telemetry is not None:
+                    search_kwargs["telemetry"] = True
                 results = await client.search(query, **search_kwargs)
+                if (
+                    compile_telemetry is not None
+                    and isinstance(results, dict)
+                    and isinstance(results.get("telemetry"), dict)
+                ):
+                    compile_telemetry.append(results["telemetry"])
                 filtered_items = self._filter_search_items(results, min_score=min_score)
                 for item_type, items in filtered_items.items():
                     grouped_items[item_type].extend(items)

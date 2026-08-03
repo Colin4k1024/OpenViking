@@ -570,9 +570,10 @@ class VikingClient:
         context_type: Optional[str | list[str]] = None,
         filter: Optional[Dict[str, Any]] = None,
         limit: int = 10,
+        telemetry: Any = False,
     ):
         """搜索资源"""
-        kwargs: Dict[str, Any] = {"limit": limit}
+        kwargs: Dict[str, Any] = {"limit": limit, "telemetry": telemetry}
         if context_type is not None:
             kwargs["context_type"] = context_type
         if filter is not None:
@@ -669,12 +670,14 @@ class VikingClient:
         operations: List[Dict[str, Any]],
         wait: bool = True,
         timeout: Optional[float] = None,
+        telemetry: Any = False,
     ) -> Dict[str, Any]:
         return await self.client.batch_write(
             root_uri=root_uri,
             operations=operations,
             wait=wait,
             timeout=timeout,
+            telemetry=telemetry,
         )
 
     async def read_content(
@@ -746,6 +749,7 @@ class VikingClient:
         limit: int = 10,
         user_id: Optional[str] = None,
         peer_id: Optional[str] = None,
+        telemetry: Any = False,
     ) -> Dict[str, Any]:
         client = self.client
         should_close = False
@@ -762,6 +766,7 @@ class VikingClient:
                 query,
                 target_uri=target_uri,
                 limit=limit,
+                telemetry=telemetry,
             )
         finally:
             if should_close:
@@ -771,7 +776,7 @@ class VikingClient:
         memories = self._matched_context_group_to_dicts(result, "memories")
         resources = self._matched_context_group_to_dicts(result, "resources")
         skills = self._matched_context_group_to_dicts(result, "skills")
-        return {
+        normalized = {
             "memories": memories,
             "resources": resources,
             "skills": skills,
@@ -779,6 +784,9 @@ class VikingClient:
             "query": query,
             "target_uri": target_uri,
         }
+        if telemetry and isinstance(result, dict) and result.get("telemetry") is not None:
+            normalized["telemetry"] = result["telemetry"]
+        return normalized
 
     async def search_user_memory(self, query: str, user_id: str) -> list[Any]:
         effective_user_id = self._effective_user_id(user_id)

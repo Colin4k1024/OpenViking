@@ -229,11 +229,21 @@ async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
                             tokens=3,
                         ),
                     ],
-                    usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "cache_read_input_tokens": 4,
+                        "total_tokens": 12,
+                    },
                 )
             return LLMResponse(
                 content="final answer from gathered tool results",
-                usage={"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+                usage={
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "cache_read_input_tokens": 3,
+                    "total_tokens": 12,
+                },
             )
 
         def get_default_model(self) -> str:
@@ -312,7 +322,13 @@ async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
         "tool result: useful context",
         "tool result: useful context",
     ]
-    assert token_usage == {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+    assert token_usage == {
+        "prompt_tokens": 17,
+        "completion_tokens": 7,
+        "cache_read_input_tokens": 7,
+        "reasoning_tokens": 0,
+        "total_tokens": 24,
+    }
 
 
 @pytest.mark.asyncio

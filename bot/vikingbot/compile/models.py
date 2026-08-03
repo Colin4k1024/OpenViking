@@ -23,7 +23,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed"})
 class CompileLimits(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    source_roots: int = 16
+    source_roots: int = 32
     source_catalog_entries: int = 200
     skill_files: int = 128
     skill_file_bytes: int = 8 * 1024 * 1024
@@ -37,9 +37,10 @@ class CompileLimits(BaseModel):
     output_pages: int = 64
     output_files: int = 64
     output_total_bytes: int = 4 * 1024 * 1024
-    concurrent_tasks: int = 2
+    model_output_tokens: int = 16_384
+    concurrent_tasks: int = 10
     accepted_tasks: int = 16
-    accepted_tasks_per_principal: int = 4
+    accepted_tasks_per_principal: int = 10
     queue_wait_seconds: float = 5 * 60
     task_runtime_seconds: float = 30 * 60
     terminal_task_retention_seconds: float = 24 * 60 * 60
@@ -184,6 +185,9 @@ class CompileResult(BaseModel):
     unchanged: list[str] = Field(default_factory=list)
     page_count: int = 0
     link_count: int = 0
+    token_usage: dict[str, int] = Field(default_factory=dict)
+    iterations: int = 0
+    duration_seconds: float = 0.0
     warnings: list[str] = Field(default_factory=list)
 
 

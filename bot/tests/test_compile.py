@@ -9,6 +9,7 @@ import pytest
 from vikingbot.agent.loop import AgentLoop
 from vikingbot.agent.tools.base import Tool, ToolContext
 from vikingbot.agent.tools.compile import CompileScopedTool, SubmitWikiBundleTool
+from vikingbot.agent.tools.ov_file import VikingSearchTool
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.compile.models import (
     DEFAULT_COMPILE_REASON,
@@ -21,7 +22,12 @@ from vikingbot.compile.models import (
     utc_now,
 )
 from vikingbot.compile.renderer import WikiRenderer, content_hash, wiki_page_path_from_title
-from vikingbot.compile.service import BotCompileService, CompileCapabilities
+from vikingbot.compile.service import (
+    BotCompileService,
+    CompileCapabilities,
+    _add_telemetry_usage,
+    _compile_token_usage,
+)
 from vikingbot.compile.store import CompileTaskStore
 from vikingbot.config.schema import DirectBackendConfig, SandboxBackend, SessionKey
 
@@ -104,10 +110,52 @@ def test_compile_bundle_schema_distinguishes_wiki_pages_and_artifact_files():
     assert "preserve every required path and format" in properties["files"]["description"]
 
 
+def test_compile_token_usage_merges_model_and_openviking_telemetry():
+    usage = _compile_token_usage(
+        {
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "cache_read_input_tokens": 6,
+            "reasoning_tokens": 2,
+            "total_tokens": 14,
+        }
+    )
+    _add_telemetry_usage(
+        usage,
+        {
+            "summary": {
+                "tokens": {
+                    "llm": {
+                        "input": 1,
+                        "output": 2,
+                        "total": 3,
+                        "prompt_cached": 1,
+                        "completion_reasoning": 1,
+                    },
+                    "embedding": {"total": 5},
+                }
+            }
+        },
+    )
+
+    assert usage == {
+        "input_tokens": 11,
+        "output_tokens": 6,
+        "cache_tokens": 7,
+        "reasoning_tokens": 3,
+        "llm_total_tokens": 17,
+        "embedding_tokens": 5,
+        "total_tokens": 22,
+    }
+
+
 def test_compile_limit_defaults_match_the_resource_envelope():
     limits = CompileLimits()
 
-    assert limits.concurrent_tasks == 2
+    assert limits.source_roots == 32
+    assert limits.concurrent_tasks == 10
+    assert limits.accepted_tasks_per_principal == 10
+    assert limits.model_output_tokens == 16_384
     assert limits.target_inventory_entries == 2000
     assert limits.target_catalog_pages == 10
     assert DirectBackendConfig().allow_compile_exec is False
@@ -1220,6 +1268,73 @@ async def test_scoped_tool_requires_and_bounds_openviking_uri():
 
 
 @pytest.mark.asyncio
+async def test_scoped_search_forwards_compile_telemetry_accumulator():
+    class SearchEchoTool(_EchoTool):
+        @property
+        def name(self):
+            return "openviking_search"
+
+    telemetry = []
+    wrapped = CompileScopedTool(
+        SearchEchoTool(),
+        roots=("viking://user/default/memories",),
+        limits=CompileLimits(),
+        result_budget={"bytes": 0},
+        budget_lock=__import__("asyncio").Lock(),
+        telemetry=telemetry,
+    )
+
+    result = json.loads(
+        await wrapped.execute(
+            ToolContext(),
+            query="old memories",
+            target_uri="viking://user/default/memories",
+        )
+    )
+
+    assert result["_compile_telemetry"] == telemetry
+
+
+@pytest.mark.asyncio
+async def test_openviking_search_collects_requested_telemetry(monkeypatch):
+    class Client:
+        actor_peer_id = "peer"
+
+        async def search(self, query, **kwargs):
+            assert query == "old memories"
+            assert kwargs["telemetry"] is True
+            return {
+                "memories": [
+                    {
+                        "uri": "viking://user/default/memories/events/a.md",
+                        "abstract": "A",
+                        "is_leaf": True,
+                        "score": 0.9,
+                    }
+                ],
+                "telemetry": {
+                    "summary": {"tokens": {"embedding": {"total": 5}}}
+                },
+            }
+
+    async def get_client(_context):
+        return Client()
+
+    tool = VikingSearchTool()
+    monkeypatch.setattr(tool, "_get_client", get_client)
+    telemetry = []
+
+    await tool.execute(
+        ToolContext(),
+        query="old memories",
+        target_uri="viking://user/default/memories",
+        _compile_telemetry=telemetry,
+    )
+
+    assert telemetry == [{"summary": {"tokens": {"embedding": {"total": 5}}}}]
+
+
+@pytest.mark.asyncio
 async def test_scoped_tool_enforces_per_call_and_total_result_budgets():
     limits = CompileLimits(tool_result_bytes=8, tool_total_result_bytes=12)
     budget = {"bytes": 0}
@@ -1254,6 +1369,7 @@ async def test_structured_wrapper_delegates_to_only_existing_loop_without_fallba
             assert kwargs["stop_tool_names"] == ["submit_wiki_bundle"]
             assert kwargs["allow_final_fallback"] is False
             assert kwargs["inject_write_experience"] is False
+            assert kwargs["max_tokens"] == 8192
             assert kwargs["messages"] == [
                 {"role": "system", "content": "system"},
                 {"role": "user", "content": "user"},
@@ -1270,6 +1386,7 @@ async def test_structured_wrapper_delegates_to_only_existing_loop_without_fallba
         openviking_tool_names=set(),
         stop_tool_names=["submit_wiki_bundle"],
         openviking_connection={"api_key": "secret"},
+        max_tokens=8192,
     )
     assert bundle is expected
     assert tools == []
@@ -1361,6 +1478,19 @@ def test_compile_target_accepts_only_exact_skill_namespaces():
         BotCompileService._validate_target_directory(
             "viking://agent/legacy-agent/skills", directory
         )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "viking://user/alice/memories",
+        "viking://user/alice/memories/preferences",
+        "viking://user/alice/peers/bob/memories",
+        "viking://user/alice/peers/bob/memories/custom/type",
+    ],
+)
+def test_compile_target_accepts_memory_root_and_descendants(target):
+    BotCompileService._validate_target_directory(target, {"isDir": True})
 
 
 @pytest.mark.asyncio
@@ -1510,6 +1640,7 @@ async def test_execute_skill_target_skips_recursive_catalog_and_completes(
             del kwargs
 
         async def run_structured_task(self, **kwargs):
+            assert kwargs["max_tokens"] == 16_384
             tool = kwargs["tool_registry"].get("submit_wiki_bundle")
             accepted = await tool.execute(
                 ToolContext(),
@@ -1523,7 +1654,17 @@ async def test_execute_skill_target_skips_recursive_catalog_and_completes(
                 ],
             )
             assert accepted.startswith("Skill bundle accepted")
-            return tool.bundle, [], {}, 1
+            return (
+                tool.bundle,
+                [],
+                {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "cache_read_input_tokens": 4,
+                    "total_tokens": 15,
+                },
+                3,
+            )
 
         async def close_mcp(self):
             return None
@@ -1592,6 +1733,7 @@ async def test_execute_skill_target_skips_recursive_catalog_and_completes(
         workspace_baseline,
         wiki_uri_resolver,
         capabilities,
+        telemetry,
     ):
         del request_loop, roots, source_ids
         assert capabilities == CompileCapabilities(exec_enabled=False)
@@ -1599,6 +1741,7 @@ async def test_execute_skill_target_skips_recursive_catalog_and_completes(
         assert file_catalog_uris == set()
         assert workspace_baseline is None
         assert callable(wiki_uri_resolver)
+        assert telemetry == []
         registry = ToolRegistry()
         registry.register(
             SubmitWikiBundleTool(
@@ -1664,6 +1807,17 @@ async def test_execute_skill_target_skips_recursive_catalog_and_completes(
     assert task.result.created == [f"{target_uri}/weekly-report"]
     assert task.result.updated == []
     assert task.result.page_count == 0
+    assert task.result.token_usage == {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_tokens": 4,
+        "reasoning_tokens": 0,
+        "llm_total_tokens": 15,
+        "embedding_tokens": 0,
+        "total_tokens": 15,
+    }
+    assert task.result.iterations == 3
+    assert task.result.duration_seconds >= 0
     assert client.added == f"{target_uri}/weekly-report"
 
 
@@ -1765,7 +1919,10 @@ async def test_target_catalog_includes_raw_files_and_marks_wiki_pages():
                     {"uri": "viking://resources/ara/Long.md"},
                     {"uri": "viking://resources/ara/trace/tree.yaml"},
                     {"uri": "viking://resources/outside.md"},
-                ]
+                ],
+                "telemetry": {
+                    "summary": {"tokens": {"embedding": {"total": 5}}}
+                },
             }
 
         async def read_raw(self, uri, *, offset=0, limit=-1):
@@ -1792,10 +1949,12 @@ async def test_target_catalog_includes_raw_files_and_marks_wiki_pages():
     service = object.__new__(BotCompileService)
     service.limits = CompileLimits()
     client = Client()
+    telemetry = []
     catalog, inventory = await service._build_catalog(
         client,
         "viking://resources/ara",
         query="compile ResNet\nsource overview",
+        telemetry=telemetry,
     )
 
     assert catalog == [
@@ -1844,8 +2003,10 @@ async def test_target_catalog_includes_raw_files_and_marks_wiki_pages():
             "target_uri": "viking://resources/ara",
             "context_type": "resource",
             "limit": CompileLimits().target_catalog_pages,
+            "telemetry": True,
         },
     )
+    assert telemetry == [{"summary": {"tokens": {"embedding": {"total": 5}}}}]
     assert client.reads.count(("viking://resources/ara/Long.md", 128)) == 1
     assert client.reads.count(("viking://resources/ara/Long.md", -1)) == 1
     assert {uri for uri, _ in client.reads} == {
@@ -2027,9 +2188,11 @@ def test_compile_prompt_routes_skill_cli_commands_through_exec():
     assert "pages=[]" not in system
     assert "body_workspace_path" in system
     assert "__compile_staging__/wiki_pages/" in system
+    assert "never shorten it to a basename" in system
     assert "__compile_staging__/tmp/" in system
     assert "use its URI as an ordinary Markdown link" in system
     assert "unavailable" not in user
+    assert "Compile target directory:\nviking://resources/wiki" in user
     assert "verify every output path and format explicitly required by the Skill" in user
     for implementation_name in (
         "submit_wiki_bundle",
@@ -2093,6 +2256,7 @@ def test_compile_prompt_requires_one_complete_skill_package_without_exec():
     assert "<skill-name>/SKILL.md" in system
     assert "Do not produce Wiki pages, links" in system
     assert "one complete Skill package" in user
+    assert f"Compile target directory:\n{request.to}" in user
     assert "on demand" in user
     assert "existing auxiliary files not included in the submission are preserved" in user
     assert "Existing target files" not in user
