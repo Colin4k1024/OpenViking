@@ -42,6 +42,7 @@ _TRANSIENT_HTTP_ERRORS = (
     httpx.RemoteProtocolError,
     httpx.TimeoutException,
 )
+_SESSION_CREATE_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 def _retry_delay(attempt: int, *, base: float = 0.5, cap: float = 8.0) -> float:
@@ -355,6 +356,7 @@ def write_success_record(
     record: Dict[str, Any], csv_path: str = "./result/locomo/import_success.csv"
 ) -> None:
     """写入成功记录到CSV文件"""
+    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
     file_exists = Path(csv_path).exists()
     fieldnames = [
         "timestamp",
@@ -400,6 +402,7 @@ def write_error_record(
     record: Dict[str, Any], error_path: str = "./result/locomo/import_errors.log"
 ) -> None:
     """写入错误记录到日志文件"""
+    Path(error_path).parent.mkdir(parents=True, exist_ok=True)
     with open(error_path, "a", encoding="utf-8") as f:
         timestamp = record["timestamp"]
         sample_id = record["sample_id"]
@@ -569,11 +572,16 @@ async def viking_ingest(
     memory_policy = build_memory_policy(group_chat)
 
     try:
-        # Create session. Safe to retry: no messages have been written yet.
-        create_res = await _retry_transient_http(
-            "create_session",
-            lambda: client.create_session(memory_policy=memory_policy),
+        # The server lazily creates user directories here. Serialize session
+        # creation per identity so parallel samples do not race on PathLock.
+        create_lock = _SESSION_CREATE_LOCKS.setdefault(
+            (openviking_url, account, user_id or ""), asyncio.Lock()
         )
+        async with create_lock:
+            create_res = await _retry_transient_http(
+                "create_session",
+                lambda: client.create_session(memory_policy=memory_policy),
+            )
         session_id = create_res["session_id"]
 
         # Add messages one by one with created_at. Do not retry append-only

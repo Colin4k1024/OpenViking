@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import sys
@@ -24,6 +25,14 @@ IMPORT_TO_OV = _load_module(
     "test_import_to_ov_module", "benchmark/locomo/vikingbot/import_to_ov.py"
 )
 RUN_EVAL = _load_module("test_run_eval_module", "benchmark/locomo/vikingbot/run_eval.py")
+IMPORT_VIA_COMPILE = _load_module(
+    "test_import_via_compile_module",
+    "benchmark/locomo/compile/import_via_compile.py",
+)
+COMPILE_RUN_EVAL = _load_module(
+    "test_compile_run_eval_module",
+    "benchmark/locomo/compile/run_eval.py",
+)
 
 
 def _sample_payload():
@@ -68,6 +77,169 @@ def test_build_session_messages_non_group_uses_sample_peer_and_prefixes_speaker(
     assert [msg["peer_id"] for msg in messages] == ["conv-26", "conv-26"]
     assert messages[0]["text"] == "Alice: Hi Bob"
     assert messages[1]["text"] == "Bob: Hello Alice"
+
+
+def test_compile_import_preserves_sessions_and_builds_skill_command():
+    sample = _sample_payload()
+    sample["conversation"]["session_2"] = [{"speaker": "Alice", "text": "Second session"}]
+    sample["conversation"]["session_2_date_time"] = "9:00 am on 9 May, 2023"
+    sessions = IMPORT_VIA_COMPILE.conversation_sessions(sample)
+    messages = sessions[0]
+    args = SimpleNamespace(
+        ov_bin="ov",
+        timeout=3600,
+        reason="",
+    )
+    command = IMPORT_VIA_COMPILE._compile_command(
+        args,
+        session_uris=[
+            "viking://user/alice/sessions/one",
+            "viking://user/alice/sessions/two",
+        ],
+        memory_uri="viking://user/alice/peers/conv-26/memories",
+        skill_uri="viking://user/alice/skills/session-memory-consolidation",
+    )
+
+    assert len(sessions) == 2
+    assert [part["text"] for part in messages[0]["parts"]] == ["Alice: Hi Bob"]
+    assert sessions[1][0]["parts"][0]["text"] == "Alice: Second session"
+    assert messages[1]["created_at"] > messages[0]["created_at"]
+    assert command.count("--from") == 2
+    assert "viking://user/alice/peers/conv-26/memories" not in [
+        command[index + 1] for index, value in enumerate(command) if value == "--from"
+    ]
+    assert command[command.index("--skill") + 1].endswith("/skills/session-memory-consolidation")
+    assert IMPORT_VIA_COMPILE.DEFAULT_RESULT_DIR.name == "result"
+    assert IMPORT_VIA_COMPILE.DEFAULT_RESULT_DIR.parent.name == "compile"
+
+
+def test_compile_import_summary_aggregates_cost():
+    summary = IMPORT_VIA_COMPILE._summary(
+        [
+            {
+                "message_count": 100,
+                "pipeline_duration_seconds": 2.0,
+                "compile_result": {
+                    "page_count": 4,
+                    "duration_seconds": 1.25,
+                    "token_usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "cache_tokens": 4,
+                        "reasoning_tokens": 1,
+                        "llm_total_tokens": 15,
+                        "embedding_tokens": 3,
+                        "total_tokens": 18,
+                    },
+                },
+            },
+            {
+                "message_count": 20,
+                "pipeline_duration_seconds": 1.0,
+                "compile_result": {
+                    "page_count": 1,
+                    "duration_seconds": 0.75,
+                    "token_usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 2,
+                        "llm_total_tokens": 7,
+                        "total_tokens": 7,
+                    },
+                },
+            },
+        ]
+    )
+
+    assert summary == {
+        "compile_groups": 2,
+        "messages": 120,
+        "pages": 5,
+        "average_compile_duration_seconds": 1.0,
+        "average_pipeline_duration_seconds": 1.5,
+        "average_token_usage": {
+            "input_tokens": 7.5,
+            "output_tokens": 3.5,
+            "cache_tokens": 2.0,
+            "reasoning_tokens": 0.5,
+            "llm_total_tokens": 11.0,
+            "embedding_tokens": 1.5,
+            "total_tokens": 12.5,
+        },
+        "total_token_usage": {
+            "input_tokens": 15,
+            "output_tokens": 7,
+            "cache_tokens": 4,
+            "reasoning_tokens": 1,
+            "llm_total_tokens": 22,
+            "embedding_tokens": 3,
+            "total_tokens": 25,
+        },
+    }
+
+
+def test_compile_eval_normalizes_memory_content_and_search_results():
+    raw = """---
+type: entities
+title: Oscar
+---
+
+# Oscar
+Caroline's [pet guinea pig](./other.md).
+
+# Citations
+
+[1] source
+
+<!-- MEMORY_FIELDS
+{"memory_type": "entities"}
+-->
+"""
+    result = {
+        "memories": [
+            {"uri": "viking://user/alice/peers/conv-26/memories/.overview.md"},
+            {
+                "uri": "viking://user/alice/peers/conv-26/memories/entities/pet/oscar.md",
+                "score": 0.9,
+            },
+        ]
+    }
+
+    assert COMPILE_RUN_EVAL.clean_memory_content(raw) == (
+        "# Oscar\nCaroline's pet guinea pig."
+    )
+    contexts = COMPILE_RUN_EVAL.select_search_contexts(result, limit=10)
+    assert [context["uri"] for context in contexts] == [
+        "viking://user/alice/peers/conv-26/memories/entities/pet/oscar.md"
+    ]
+
+
+def test_compile_eval_applies_one_budget_across_different_memory_layouts():
+    assert COMPILE_RUN_EVAL.DEFAULT_SEARCH_LIMIT == 50
+
+    contexts = [
+        {"uri": "viking://user/alice/peers/conv-26/memories/Caroline.md", "content": "abcdef"},
+        {
+            "uri": "viking://user/alice/peers/conv-26/memories/events/2023/05/03/a.md",
+            "content": "ghijkl",
+        },
+        {
+            "uri": "viking://user/alice/peers/conv-26/memories/preferences/alice/art.md",
+            "content": "mnop",
+        },
+    ]
+
+    selected, skipped, truncated, total = COMPILE_RUN_EVAL.fit_contexts_to_char_budget(
+        contexts, max_chars=10
+    )
+
+    assert [context["content"] for context in selected] == ["abcdef", "g..."]
+    assert truncated == [
+        "viking://user/alice/peers/conv-26/memories/events/2023/05/03/a.md"
+    ]
+    assert skipped == [
+        "viking://user/alice/peers/conv-26/memories/preferences/alice/art.md"
+    ]
+    assert total == 10
 
 
 @pytest.mark.asyncio
@@ -128,6 +300,57 @@ async def test_viking_ingest_uses_message_peer_id(monkeypatch):
     add_calls = [entry for entry in calls if entry[0] == "add_message"]
     assert len(add_calls) == 1
     assert add_calls[0][1]["peer_id"] == "conv-26"
+
+
+@pytest.mark.asyncio
+async def test_viking_ingest_serializes_session_creation_per_user(monkeypatch):
+    active_creates = 0
+    max_active_creates = 0
+    session_count = 0
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def initialize(self):
+            return None
+
+        async def create_session(self, memory_policy=None):
+            nonlocal active_creates, max_active_creates, session_count
+            del memory_policy
+            active_creates += 1
+            max_active_creates = max(max_active_creates, active_creates)
+            await asyncio.sleep(0.01)
+            active_creates -= 1
+            session_count += 1
+            return {"session_id": f"sess-{session_count}"}
+
+        async def add_message(self, **_kwargs):
+            return None
+
+        async def get_session(self, _session_id):
+            return {"commit_count": 0}
+
+        async def commit_session(self, _session_id, telemetry=True):
+            del telemetry
+            return {"status": "accepted", "task_id": None, "trace_id": ""}
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(IMPORT_TO_OV.ov, "AsyncHTTPClient", lambda **kwargs: FakeClient(**kwargs))
+
+    async def ingest():
+        return await IMPORT_TO_OV.viking_ingest(
+            messages=[{"role": "user", "text": "hello", "peer_id": "conv-26"}],
+            openviking_url="http://lock-test",
+            user_id="jiajie",
+            account="default",
+        )
+
+    await asyncio.gather(ingest(), ingest())
+
+    assert max_active_creates == 1
 
 
 @pytest.mark.asyncio
