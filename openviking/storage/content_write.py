@@ -31,7 +31,12 @@ from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 from openviking.storage.queuefs import SemanticMsg, get_queue_manager
 from openviking.storage.queuefs.semantic_msg import build_semantic_coalesce_key
 from openviking.storage.viking_fs import VikingFS
-from openviking.telemetry import get_current_telemetry
+from openviking.telemetry import (
+    get_current_telemetry,
+    register_telemetry,
+    resolve_telemetry,
+    unregister_telemetry,
+)
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.telemetry.resource_summary import build_queue_status_payload
 from openviking.utils.path_safety import validate_safe_viking_uri_path
@@ -246,13 +251,18 @@ class ContentWriteCoordinator:
             lock_released = True
 
         assert lock_released
-        telemetry_id = get_current_telemetry().telemetry_id
+        telemetry = get_current_telemetry()
+        telemetry_id = telemetry.telemetry_id
         request_registered = False
+        telemetry_registered = False
         try:
             if refresh_kinds:
                 if wait and telemetry_id:
                     get_request_wait_tracker().register_request(telemetry_id)
                     request_registered = True
+                    if telemetry.enabled and resolve_telemetry(telemetry_id) is None:
+                        register_telemetry(telemetry)
+                        telemetry_registered = resolve_telemetry(telemetry_id) is telemetry
                 try:
                     queue_status = await self._refresh_batch(
                         refresh_kinds=refresh_kinds,
@@ -291,6 +301,8 @@ class ContentWriteCoordinator:
         finally:
             if request_registered:
                 get_request_wait_tracker().cleanup(telemetry_id)
+            if telemetry_registered:
+                unregister_telemetry(telemetry_id)
 
         if conflict is not None:
             raise conflict
@@ -316,11 +328,8 @@ class ContentWriteCoordinator:
         if classification.context_type not in {"resource", "memory"}:
             raise InvalidArgumentError("batch-write root must be a resource or memory directory")
         if classification.context_type == "memory":
-            if (
-                classification.content_index is None
-                or len(parts) <= classification.content_index + 1
-            ):
-                raise InvalidArgumentError("batch-write root must be inside a memory type directory")
+            if classification.content_index is None:
+                raise InvalidArgumentError("batch-write root must be a memory directory")
         elif parts == ["resources"] or (
             classification.content_index is not None
             and len(parts) <= classification.content_index + 1

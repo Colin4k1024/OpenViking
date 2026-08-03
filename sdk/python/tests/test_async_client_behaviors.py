@@ -98,6 +98,43 @@ async def test_async_http_client_batch_add_messages_url_encodes_session_id():
 
 
 @pytest.mark.asyncio
+async def test_async_http_client_batch_write_returns_requested_telemetry():
+    client = AsyncHTTPClient(url="http://localhost:1933")
+    client._request = AsyncMock(return_value=object())
+    client._handle_response_data = lambda _response: {
+        "result": {"created": ["viking://user/default/memories/events/a.md"]},
+        "telemetry": {"summary": {"tokens": {"embedding": {"total": 7}}}},
+    }
+
+    result = await client.batch_write(
+        "viking://user/default/memories",
+        [
+            {
+                "uri": "viking://user/default/memories/events/a.md",
+                "content": "A",
+            }
+        ],
+        telemetry=True,
+    )
+
+    assert result["telemetry"]["summary"]["tokens"]["embedding"]["total"] == 7
+
+
+@pytest.mark.asyncio
+async def test_async_http_client_find_returns_requested_telemetry():
+    client = AsyncHTTPClient(url="http://localhost:1933")
+    client._request = AsyncMock(return_value=object())
+    client._handle_response_data = lambda _response: {
+        "result": {"memories": []},
+        "telemetry": {"summary": {"tokens": {"embedding": {"total": 5}}}},
+    }
+
+    result = await client.find("old memories", telemetry=True)
+
+    assert result["telemetry"]["summary"]["tokens"]["embedding"]["total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_async_http_client_sends_message_semantics_and_turn_retention():
     client = AsyncHTTPClient(url="http://localhost:1933")
     fake_http = SimpleNamespace(post=AsyncMock(return_value=object()))

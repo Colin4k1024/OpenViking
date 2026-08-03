@@ -547,6 +547,13 @@ class AsyncHTTPClient:
             )
         return data
 
+    @staticmethod
+    def _result_with_telemetry(data: Dict[str, Any], telemetry: Any) -> Dict[str, Any]:
+        result = dict(data.get("result", {}))
+        if telemetry and data.get("telemetry") is not None:
+            result["telemetry"] = data["telemetry"]
+        return result
+
     def _handle_response(self, response: httpx.Response) -> Any:
         return self._handle_response_data(response).get("result")
 
@@ -1158,7 +1165,7 @@ class AsyncHTTPClient:
                 "telemetry": telemetry,
             },
         )
-        return self._handle_response_data(response).get("result", {})
+        return self._result_with_telemetry(self._handle_response_data(response), telemetry)
 
     async def set_tags(
         self,
@@ -1208,7 +1215,7 @@ class AsyncHTTPClient:
         }
         payload = self._compact_request_body(payload)
         response = await self._request("POST", "/api/v1/search/find", json=payload)
-        return self._handle_response_data(response).get("result", {})
+        return self._result_with_telemetry(self._handle_response_data(response), telemetry)
 
     async def search(
         self,
@@ -1241,7 +1248,7 @@ class AsyncHTTPClient:
         }
         payload = self._compact_request_body(payload)
         response = await self._request("POST", "/api/v1/search/search", json=payload)
-        return self._handle_response_data(response).get("result", {})
+        return self._result_with_telemetry(self._handle_response_data(response), telemetry)
 
     async def grep(
         self,

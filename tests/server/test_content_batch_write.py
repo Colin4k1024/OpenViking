@@ -6,6 +6,8 @@ import pytest
 import openviking.storage.content_write as content_write_module
 from openviking.server.identity import RequestContext, Role
 from openviking.storage.content_write import ContentWriteCoordinator
+from openviking.telemetry import resolve_telemetry
+from openviking.telemetry.execution import run_with_telemetry
 from openviking_cli.exceptions import (
     ConflictError,
     InvalidArgumentError,
@@ -155,6 +157,44 @@ async def test_batch_releases_tree_lock_before_one_aggregated_refresh(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_batch_wait_collects_embedding_tokens_from_queue_worker(monkeypatch):
+    root = "viking://user/default/memories"
+    memory = f"{root}/profile.md"
+    coordinator = ContentWriteCoordinator(_VFS(root))
+    telemetry_ids = []
+
+    async def refresh(**kwargs):
+        telemetry_id = kwargs["telemetry_id"]
+        telemetry_ids.append(telemetry_id)
+        collector = resolve_telemetry(telemetry_id)
+        assert collector is not None
+        collector.add_token_usage_by_source("embedding", 37)
+        return {"Embedding": {"processed": 1, "error_count": 0}}
+
+    monkeypatch.setattr(coordinator, "_refresh_batch", refresh)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
+    execution = await run_with_telemetry(
+        operation="content.batch_write",
+        telemetry=True,
+        fn=lambda: coordinator.batch_write(
+            root_uri=root,
+            operations=[
+                {
+                    "uri": memory,
+                    "content": "Remember this.",
+                    "precondition": {"kind": "create_if_absent"},
+                }
+            ],
+            ctx=ctx,
+            wait=True,
+        ),
+    )
+
+    assert execution.telemetry["summary"]["tokens"]["embedding"]["total"] == 37
+    assert resolve_telemetry(telemetry_ids[0]) is None
+
+
+@pytest.mark.asyncio
 async def test_batch_writes_and_hashes_binary_content(monkeypatch):
     root = "viking://resources/wiki"
     image = f"{root}/figure.png"
@@ -186,6 +226,42 @@ async def test_batch_writes_and_hashes_binary_content(monkeypatch):
         root_uri=root, operations=[operation], ctx=ctx, wait=False
     )
     assert retry["unchanged"] == [image]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "root",
+    [
+        "viking://user/default/memories",
+        "viking://user/jiajie/peers/conv-26/memories",
+    ],
+)
+async def test_batch_accepts_memory_store_root(monkeypatch, root):
+    event = f"{root}/events/launch.md"
+    vfs = _VFS(root)
+    coordinator = ContentWriteCoordinator(vfs)
+    refreshed = []
+
+    async def refresh(**kwargs):
+        refreshed.append(kwargs["refresh_kinds"])
+
+    monkeypatch.setattr(coordinator, "_refresh_batch", refresh)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
+    result = await coordinator.batch_write(
+        root_uri=root,
+        operations=[
+            {
+                "uri": event,
+                "content": "Launched the experiment.",
+                "precondition": {"kind": "create_if_absent"},
+            }
+        ],
+        ctx=ctx,
+        wait=False,
+    )
+
+    assert result["created"] == [event]
+    assert refreshed == [{event: "added"}]
 
 
 @pytest.mark.asyncio
