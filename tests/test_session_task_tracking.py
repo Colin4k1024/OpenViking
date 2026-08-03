@@ -9,7 +9,6 @@ from typing import AsyncGenerator, Tuple
 import httpx
 import pytest_asyncio
 
-from openviking import AsyncOpenViking
 from openviking.core.namespace import canonical_session_uri
 from openviking.server.app import create_app
 from openviking.server.config import ServerConfig
@@ -32,7 +31,6 @@ async def api_client(temp_dir) -> AsyncGenerator[Tuple[httpx.AsyncClient, OpenVi
         yield client, service
 
     await service.close()
-    await AsyncOpenViking.reset()
     set_task_tracker(None)
 
 

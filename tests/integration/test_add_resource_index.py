@@ -1,91 +1,21 @@
-import json
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openviking.async_client import AsyncOpenViking
-from openviking_cli.utils.config import OPENVIKING_CONFIG_ENV
-from openviking_cli.utils.config.open_viking_config import OpenVikingConfigSingleton
-from tests.utils.mock_agfs import MockLocalAGFS
-
-
-@pytest.fixture
-def test_config(tmp_path):
-    """Create a temporary config file."""
-    config_path = tmp_path / "ov.conf"
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    config_content = {
-        "storage": {
-            "workspace": str(workspace),
-            "agfs": {"backend": "local", "port": 1833},
-            "vectordb": {"backend": "local"},
-        },
-        "embedding": {
-            "dense": {"provider": "openai", "api_key": "fake", "model": "text-embedding-3-small"}
-        },
-        "vlm": {"provider": "openai", "api_key": "fake", "model": "gpt-4-vision-preview"},
-    }
-    config_path.write_text(json.dumps(config_content))
-    return config_path
-
-
-@pytest.fixture
-async def client(test_config, tmp_path):
-    """Initialize AsyncOpenViking client with mocks."""
-
-    # Set config env var
-    os.environ[OPENVIKING_CONFIG_ENV] = str(test_config)
-
-    # Reset Singletons
-    OpenVikingConfigSingleton._instance = None
-    await AsyncOpenViking.reset()
-
-    mock_agfs = MockLocalAGFS(root_path=tmp_path / "mock_agfs_root")
-
-    # Mock LLM/VLM services AND AGFS
-    with (
-        patch("openviking.utils.summarizer.Summarizer.summarize") as mock_summarize,
-        patch("openviking.utils.index_builder.IndexBuilder.build_index") as mock_build_index,
-        patch("openviking.utils.agfs_utils.create_agfs_client", return_value=mock_agfs),
-    ):
-        # Make mocks return success
-        mock_summarize.return_value = {"status": "success"}
-        mock_build_index.return_value = {"status": "success"}
-
-        client = AsyncOpenViking(path=str(test_config.parent))
-        await client.initialize()
-
-        yield client
-
-        await client.close()
-
-        # Cleanup
-        OpenVikingConfigSingleton._instance = None
-        if OPENVIKING_CONFIG_ENV in os.environ:
-            del os.environ[OPENVIKING_CONFIG_ENV]
+from openviking.server.identity import RequestContext
+from openviking.service.core import OpenVikingService
 
 
 @pytest.mark.asyncio
-async def test_add_resource_indexing_logic(test_config, tmp_path):
-    """
-    Integration-like test for add_resource indexing logic.
-    Uses Mock AGFS but tests the client logic.
-    """
-    # Set config env var
-    os.environ[OPENVIKING_CONFIG_ENV] = str(test_config)
-    OpenVikingConfigSingleton._instance = None
-    await AsyncOpenViking.reset()
-
-    # Create dummy resource
+async def test_add_resource_indexing_logic(
+    service: OpenVikingService,
+    request_context: RequestContext,
+    tmp_path,
+):
+    """The resource service must honor build_index and summarize independently."""
     resource_file = tmp_path / "test_doc.md"
     resource_file.write_text("# Test Document\n\nThis is a test document.", encoding="utf-8")
 
-    mock_agfs = MockLocalAGFS(root_path=tmp_path / "mock_agfs_root")
-
-    # Create mock parse result for Phase 1 (media processor)
     mock_parse_result = MagicMock()
     mock_parse_result.source_path = str(resource_file)
     mock_parse_result.meta = {}
@@ -93,18 +23,16 @@ async def test_add_resource_indexing_logic(test_config, tmp_path):
     mock_parse_result.warnings = []
     mock_parse_result.source_format = "markdown"
 
-    # Create mock context tree for Phase 2/3 (tree builder)
     mock_context_tree = MagicMock()
     mock_context_tree.root = MagicMock()
     mock_context_tree.root.uri = "viking://resources/test_doc"
     mock_context_tree.root.temp_uri = None
 
-    # Patch the Summarizer and IndexBuilder to verify calls
     with (
         patch(
-            "openviking.utils.summarizer.Summarizer.summarize", new_callable=AsyncMock
+            "openviking.utils.summarizer.Summarizer.summarize",
+            new_callable=AsyncMock,
         ) as mock_summarize,
-        patch("openviking.utils.agfs_utils.create_agfs_client", return_value=mock_agfs),
         patch(
             "openviking.utils.media_processor.UnifiedResourceProcessor.process",
             new_callable=AsyncMock,
@@ -118,42 +46,32 @@ async def test_add_resource_indexing_logic(test_config, tmp_path):
     ):
         mock_summarize.return_value = {"status": "success"}
 
-        client = AsyncOpenViking(path=str(test_config.parent))
-        await client.initialize()
+        await service.resources._execute_resource_ingestion(
+            path=str(resource_file),
+            ctx=request_context,
+            defer_post_processing=False,
+            build_index=True,
+        )
+        assert mock_summarize.call_count == 1
+        assert mock_summarize.call_args.kwargs.get("skip_vectorization") is False
 
-        try:
-            # 1. Test with build_index=True
-            await client.add_resource(path=str(resource_file), build_index=True, wait=True)
+        mock_summarize.reset_mock()
+        await service.resources._execute_resource_ingestion(
+            path=str(resource_file),
+            ctx=request_context,
+            defer_post_processing=False,
+            build_index=False,
+            summarize=True,
+        )
+        assert mock_summarize.call_count == 1
+        assert mock_summarize.call_args.kwargs.get("skip_vectorization") is True
 
-            # Verify summarizer called with skip_vectorization=False
-            assert mock_summarize.call_count == 1
-            call_kwargs = mock_summarize.call_args.kwargs
-            assert call_kwargs.get("skip_vectorization") is False
-
-            mock_summarize.reset_mock()
-
-            # 2. Test with build_index=False, summarize=True
-            await client.add_resource(
-                path=str(resource_file), build_index=False, summarize=True, wait=True
-            )
-
-            # Verify summarizer called with skip_vectorization=True
-            assert mock_summarize.call_count == 1
-            call_kwargs = mock_summarize.call_args.kwargs
-            assert call_kwargs.get("skip_vectorization") is True
-
-            mock_summarize.reset_mock()
-
-            # 3. Test with build_index=False, summarize=False
-            await client.add_resource(
-                path=str(resource_file), build_index=False, summarize=False, wait=True
-            )
-
-            # Verify summarizer NOT called
-            mock_summarize.assert_not_called()
-
-        finally:
-            await client.close()
-            OpenVikingConfigSingleton._instance = None
-            if OPENVIKING_CONFIG_ENV in os.environ:
-                del os.environ[OPENVIKING_CONFIG_ENV]
+        mock_summarize.reset_mock()
+        await service.resources._execute_resource_ingestion(
+            path=str(resource_file),
+            ctx=request_context,
+            defer_post_processing=False,
+            build_index=False,
+            summarize=False,
+        )
+        mock_summarize.assert_not_called()

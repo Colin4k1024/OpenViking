@@ -440,8 +440,8 @@ class OpenVikingService:
 
         # Register as the process-wide service so flows that resolve the
         # service via the dependency global (e.g. background reindex tasks
-        # triggered by git restore) work in embedded mode, not just under the
-        # HTTP server which calls set_service() during bootstrap.
+        # triggered by git restore) work for explicitly constructed service
+        # instances as well as server-owned instances.
         from openviking.server.dependencies import set_service
 
         set_service(self)

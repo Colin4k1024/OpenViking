@@ -46,9 +46,8 @@ class SessionService:
         self._viking_fs = viking_fs
         self._session_compressor = session_compressor
         self._tool_output_externalization_config = ToolOutputExternalizationConfig()
-        # Embedded clients do not load ServerConfig. Preserve their historical
-        # Agent memory behavior; HTTP servers always override this from
-        # server.agent_evolution during app setup.
+        # Directly constructed services default to enabled. HTTP servers override
+        # this from server.agent_evolution during app setup.
         self._agent_evolution_enabled = True
         self._agent_evolution_config_provider: Optional[AgentEvolutionConfigProvider] = None
         self._usage_reporter: Optional["UsageReporter"] = None

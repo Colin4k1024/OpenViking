@@ -27,7 +27,7 @@ def test_agent_evolution_can_be_enabled_for_the_server():
     assert config.agent_evolution.enabled is True
 
 
-def test_embedded_session_service_preserves_agent_evolution_default(
+def test_direct_session_service_preserves_agent_evolution_default(
     tmp_path,
     monkeypatch,
 ):

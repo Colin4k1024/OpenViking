@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 LOCK_FILENAME = ".openviking.pid"
 
-# A PID file protects the whole process, while multiple embedded services may
+# A PID file protects the whole process, while multiple service instances may
 # legitimately share that process and workspace.  Keep process-local ownership
 # counts so closing one service cannot expose another live service to a second
 # process.  The file remains the cross-process source of truth.
