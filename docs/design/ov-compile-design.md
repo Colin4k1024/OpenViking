@@ -421,15 +421,17 @@ renderer 使用 `yaml.safe_dump(allow_unicode=True, sort_keys=False)` 生成 YAM
 
 只有 Memory 目标使用 `MemoryFileUtils` round-trip `MEMORY_FIELDS`。create 写入 `category=page_type` 和 `version=1`；update 保留未知字段、同步 `category`，先以原 version 生成 candidate，除 version 外的最终 raw bytes 发生变化时才通过 `next_memory_version()` 推进 version。为避免 hidden links 再次命中 frontmatter，`MemoryFileUtils.write()` 增加默认保持现状的 `render_links=True` 参数，Compile 在已经渲染可见正文后以 `render_links=False` 调用。Resource 目标不写 `category`、`version` 或其他 Memory metadata。
 
-concept 页面不写 `okf_version`；该字段按 OKF 只能出现在 bundle-root `index.md`。v1 不生成或修改 `index.md`、`log.md`，但保留目标中已有的这些文件。API/result 中的 `okf_version: "0.1"` 表示本次 renderer 的目标规范版本。
+concept 页面不写 `okf_version`；该字段按 OKF 只能出现在 bundle-root `index.md`。`index.md`、`log.md` 不是 concept page，Compile 将它们作为 Resource artifact 创建或更新。API/result 中的 `okf_version: "0.1"` 表示本次 renderer 的目标规范版本。
 
 ### 8.2 路径、链接与 Citations
 
-create 的目标路径通过 `sanitize_relative_viking_path()` 和 `safe_join_viking_uri()` 约束在 canonical `to` 下；`path_hint` 为空时使用 `VikingURI.sanitize_segment(title)`，并自动追加 `.md`。点号文件、`index.md`、`log.md`、OpenViking 派生文件名和清洗后的重复路径均拒绝。update 始终使用已有 URI。
+create 的目标路径通过 `sanitize_relative_viking_path()` 和 `safe_join_viking_uri()` 约束在 canonical `to` 下。使用 workspace page body 时，`path_hint` 为空则保留 `__compile_staging__/wiki_pages/` 下的相对路径；直接提交正文时回退到 `VikingURI.sanitize_segment(title)`，并自动追加 `.md`。concept page 拒绝点号文件、`index.md`、`log.md`、OpenViking 派生文件名和清洗后的重复路径；Resource artifact 允许标准的 `index.md`、`log.md`，仍拒绝平台派生文件。update 始终使用已有 URI。
 
 bundle link 的两端必须是本次提交的页面。`match_text` 必须实际命中来源页面的 `body_markdown`，且命中位置不能位于 YAML、代码块、inline code、已有 Markdown link 或 Citations section；renderer 只对正文做 link rendering，再拼接 frontmatter 和 Citations。它使用 target-root-aware 相对路径生成标准 Markdown link，未渲染出的 link 不计入 `link_count`。Resource 目标只保留可见链接；Memory 目标还将 resolved link/backlink 合并进 `MEMORY_FIELDS`，但 v1 不写独立 relation store。
 
 renderer 把每页 `source_ids` 映射为用户传入的 canonical source directory URI，并在可见正文末尾合并成唯一的顶层 `# Citations`。已有 citation 先保留，再按 canonical target 去重追加本次来源；最终统一渲染为连续的 `[n] [label](target)` 列表，来源目录使用 canonical URI 的末级目录名作为 label，无法取得时回退为 `Source src_n`。代码块中的同名标题不视为 citation section。Agent 也可以在正文中引用来源范围内的具体文件 URI，这些 Markdown citation 的 label 和 target 会被保留并参与去重。`viking://` 是 OpenViking 对 citation target 的内部扩展，其他 OKF consumer 未必能够解析该 scheme。
+
+renderer 按每页可见正文的主语言选择自动章节标题：中文正文使用 `相关页面`、`引用来源`，其他正文使用 `Related pages`、`Citations`。语言判断忽略代码、Markdown 链接目标和裸 `viking://` URI；增量更新同时识别中英文旧标题，避免重复章节。
 
 渲染完成后，以最终 UTF-8 bytes 的 SHA-256 作为 hash。candidate 与当前 raw bytes 完全一致时归入 `unchanged` 且不提交 write operation。
 

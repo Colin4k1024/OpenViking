@@ -34,7 +34,7 @@ class LinkRenderer:
         )
         spans.extend((m.start(), m.end()) for m in re.finditer(r"`+[^\n`]*?`+", content))
 
-        for match in re.finditer(r"(?m)^# Citations[ \t]*$", content):
+        for match in re.finditer(r"(?m)^# (?:Citations|引用来源)[ \t]*$", content):
             if not any(start <= match.start() < end for start, end in spans):
                 spans.append((match.start(), len(content)))
                 break
@@ -55,7 +55,10 @@ class LinkRenderer:
         ]
 
         def _overlaps_protected_span(start: int, end: int) -> bool:
-            return any(not (end <= span_start or start >= span_end) for span_start, span_end in linked_spans)
+            return any(
+                not (end <= span_start or start >= span_end)
+                for span_start, span_end in linked_spans
+            )
 
         if LinkRenderer._contains_cjk(match_text):
             for match in re.finditer(escaped, content):
@@ -130,11 +133,7 @@ class LinkRenderer:
             # would otherwise be ambiguous). We accept the literal-space form when
             # matching existing links, but always emit the encoded form when
             # generating new ones.
-            encoded_target = (
-                link_target.replace(" ", "%20")
-                .replace("(", "%28")
-                .replace(")", "%29")
-            )
+            encoded_target = link_target.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
             rendered = f"[{content[start:end]}]({encoded_target})"
             replacements.append((start, end, rendered))
 

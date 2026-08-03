@@ -33,13 +33,18 @@ _FRONTMATTER_START_RE = re.compile(rb"\A---[ \t]*\r?\n")
 _FRONTMATTER_END_RE = re.compile(rb"\r?\n---[ \t]*(?:\r?\n|\Z)")
 _OKF_TYPE_DECLARATION_RE = re.compile(rb"""(?m)^(?:type|["']type["'])[ \t]*:""")
 _CITATION_LINE_RE = re.compile(r"^\[\d+\]\s+\[([^\]\n]+)\]\(([^)\n]+)\)\s*$")
-_BARE_VIKING_URI_RE = re.compile(
-    r"""viking://[^\s<>\[\](){}"'«»，。；：！？]+"""
+_BARE_VIKING_URI_RE = re.compile(r"""viking://[^\s<>\[\](){}"'«»，。；：！？]+""")
+_BARE_WEB_URI_RE = re.compile(r"""https?://[^\s<>\[\](){}"']+""")
+_CITATIONS_HEADING_RE = re.compile(r"(?m)^# (?:Citations|引用来源)[ \t]*$")
+_RELATED_PAGES_RE = re.compile(r"(?mi)^(#{1,6})[ \t]+(?:Related pages|相关页面)[ \t]*$")
+_FENCED_CODE_RE = re.compile(r"(?ms)^(?:```|~~~).*?^(?:```|~~~)[ \t]*$")
+_INLINE_CODE_RE = re.compile(r"`+[^\n`]*?`+")
+_HAN_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
+_PLATFORM_DERIVED_FILENAMES = frozenset(
+    {".abstract.md", ".overview.md", ".relations.json", ".source.json"}
 )
-_RELATED_PAGES_RE = re.compile(r"(?mi)^#{1,6}[ \t]+Related pages[ \t]*$")
-_RESERVED_FILENAMES = frozenset(
-    {"index.md", "log.md", ".abstract.md", ".overview.md", ".relations.json"}
-)
+_RESERVED_WIKI_PAGE_FILENAMES = frozenset({"index.md", "log.md", *_PLATFORM_DERIVED_FILENAMES})
 _PLATFORM_FRONTMATTER_FIELDS = frozenset({"type", "title", "description", "tags"})
 
 
@@ -76,9 +81,7 @@ def _split_frontmatter(content: str) -> tuple[dict[str, Any], str]:
 
 def has_unclosed_frontmatter(content: bytes) -> bool:
     opening = _FRONTMATTER_START_RE.match(content)
-    return opening is not None and _FRONTMATTER_END_RE.search(
-        content[opening.end() :]
-    ) is None
+    return opening is not None and _FRONTMATTER_END_RE.search(content[opening.end() :]) is None
 
 
 def validate_declared_okf_markdown(path: str, content: bytes) -> str | None:
@@ -166,10 +169,10 @@ def _split_citations(body: str) -> tuple[str, list[tuple[str, str]]]:
     protected = [
         (start, end)
         for start, end in LinkRenderer.protected_markdown_spans(body)
-        if not body[start:end].startswith("# Citations")
+        if not _CITATIONS_HEADING_RE.match(body[start:end])
     ]
     heading = None
-    for match in re.finditer(r"(?m)^# Citations[ \t]*$", body):
+    for match in _CITATIONS_HEADING_RE.finditer(body):
         if not any(start <= match.start() < end for start, end in protected):
             heading = match
             break
@@ -181,6 +184,15 @@ def _split_citations(body: str) -> tuple[str, list[tuple[str, str]]]:
         if match:
             citations.append((match.group(1).strip(), match.group(2).strip()))
     return body[: heading.start()].rstrip(), citations
+
+
+def _uses_chinese_headings(body: str) -> bool:
+    visible = LinkRenderer.strip_all_links(body)
+    visible = _FENCED_CODE_RE.sub(" ", visible)
+    visible = _INLINE_CODE_RE.sub(" ", visible)
+    visible = _BARE_VIKING_URI_RE.sub(" ", visible)
+    visible = _BARE_WEB_URI_RE.sub(" ", visible)
+    return len(_HAN_RE.findall(visible)) > len(_LATIN_WORD_RE.findall(visible))
 
 
 def _citation_target_allowed(target: str, source_roots: Mapping[str, str]) -> bool:
@@ -233,7 +245,12 @@ def _render_related_pages(
     incoming: list[StoredLink],
     page_titles: Mapping[str, str],
 ) -> str:
-    if not incoming or _RELATED_PAGES_RE.search(body):
+    heading = "相关页面" if _uses_chinese_headings(body) else "Related pages"
+    existing_heading = _RELATED_PAGES_RE.search(body)
+    if existing_heading:
+        replacement = f"{existing_heading.group(1)} {heading}"
+        return body[: existing_heading.start()] + replacement + body[existing_heading.end() :]
+    if not incoming:
         return body
     lines: list[str] = []
     seen: set[str] = set()
@@ -251,7 +268,7 @@ def _render_related_pages(
         lines.append(f"- [{label}]({target})")
     if not lines:
         return body
-    return body.rstrip() + "\n\n## Related pages\n\n" + "\n".join(lines)
+    return body.rstrip() + f"\n\n## {heading}\n\n" + "\n".join(lines)
 
 
 def _render_citations(
@@ -262,6 +279,7 @@ def _render_citations(
     source_roots: Mapping[str, str],
     inline_citations: list[tuple[str, str]] | None = None,
 ) -> str:
+    heading = "引用来源" if _uses_chinese_headings(body) else "Citations"
     body, draft_citations = _split_citations(body)
     _old_without_citations, old_citations = _split_citations(old_body)
     merged: list[tuple[str, str]] = []
@@ -283,7 +301,7 @@ def _render_citations(
         label = target.rstrip("/").rsplit("/", 1)[-1] or f"Source {source_id}"
         merged.append((label, target))
     lines = [f"[{index}] [{label}]({target})" for index, (label, target) in enumerate(merged, 1)]
-    return body.rstrip() + "\n\n# Citations\n\n" + "  \n".join(lines) + "\n"
+    return body.rstrip() + f"\n\n# {heading}\n\n" + "  \n".join(lines) + "\n"
 
 
 def validate_relative_page_path(path: str) -> str:
@@ -293,7 +311,7 @@ def validate_relative_page_path(path: str) -> str:
     segments = [segment for segment in relative.split("/") if segment]
     if not segments or any(segment.startswith(".") for segment in segments):
         raise ValueError(f"invalid Wiki page path: {path}")
-    if segments[-1].lower() in _RESERVED_FILENAMES:
+    if segments[-1].lower() in _RESERVED_WIKI_PAGE_FILENAMES:
         raise ValueError(f"reserved Wiki page path: {path}")
     return "/".join(segments)
 
@@ -307,13 +325,17 @@ def validate_relative_file_path(path: str) -> str:
         or any(segment.startswith(".") for segment in segments)
     ):
         raise ValueError(f"invalid output file path: {path}")
-    if segments[-1].lower() in _RESERVED_FILENAMES:
+    if segments[-1].lower() in _PLATFORM_DERIVED_FILENAMES:
         raise ValueError(f"reserved output file path: {path}")
     return relative
 
 
 def is_reserved_wiki_page_uri(uri: str) -> bool:
-    return uri.rstrip("/").rsplit("/", 1)[-1].lower() in _RESERVED_FILENAMES
+    return uri.rstrip("/").rsplit("/", 1)[-1].lower() in _RESERVED_WIKI_PAGE_FILENAMES
+
+
+def is_reserved_output_file_uri(uri: str) -> bool:
+    return uri.rstrip("/").rsplit("/", 1)[-1].lower() in _PLATFORM_DERIVED_FILENAMES
 
 
 def _merge_stored_links(
@@ -395,7 +417,9 @@ class WikiRenderer:
                 raise ValueError(f"page {page.page_id} summary must be a single line")
             if _FRONTMATTER_RE.match(page.body_markdown.lstrip()):
                 raise ValueError(f"page {page.page_id} body_markdown must not contain frontmatter")
-            source_ids = list(dict.fromkeys(value.strip() for value in page.source_ids if value.strip()))
+            source_ids = list(
+                dict.fromkeys(value.strip() for value in page.source_ids if value.strip())
+            )
             if not source_ids or any(source_id not in source_roots for source_id in source_ids):
                 raise ValueError(f"page {page.page_id} must reference valid source_ids")
 
@@ -424,7 +448,7 @@ class WikiRenderer:
         for index, file in enumerate(bundle.files):
             if file.update_uri:
                 uri = validate_safe_viking_uri_path(file.update_uri).rstrip("/")
-                if is_reserved_wiki_page_uri(uri):
+                if is_reserved_output_file_uri(uri):
                     raise ValueError(f"reserved output file cannot be updated: {uri}")
                 if uri not in file_catalog_uris:
                     raise ValueError(f"file update_uri is not in the target catalog: {uri}")
@@ -453,19 +477,20 @@ class WikiRenderer:
                 raise ValueError(f"WikiLink references an unknown page_id: f={link.f}, t={link.t}")
             if not link.match_text:
                 raise ValueError("WikiLink match_text is required")
-            if LinkRenderer._find_match_span(
-                source_page.body_markdown,
-                link.match_text,
-                LinkRenderer.protected_markdown_spans(source_page.body_markdown),
-            ) is None:
+            if (
+                LinkRenderer._find_match_span(
+                    source_page.body_markdown,
+                    link.match_text,
+                    LinkRenderer.protected_markdown_spans(source_page.body_markdown),
+                )
+                is None
+            ):
                 raise ValueError(
                     f"WikiLink match_text is not a linkable body anchor: {link.match_text!r}"
                 )
 
         resolved_links = resolve_wiki_links(bundle.links, page_uris, strict=True)
-        page_titles = {
-            page_uris[page.page_id][0]: page.title.strip() for page in bundle.pages
-        }
+        page_titles = {page_uris[page.page_id][0]: page.title.strip() for page in bundle.pages}
         result = RenderedBundle()
         total_bytes = 0
         for page in bundle.pages:
@@ -489,9 +514,7 @@ class WikiRenderer:
                 [link.model_dump() for link in outgoing],
             )
             result.link_count += rendered_count
-            rendered_body, inline_citations = _linkify_source_uris(
-                rendered_body, source_roots
-            )
+            rendered_body, inline_citations = _linkify_source_uris(rendered_body, source_roots)
             if not memory_target:
                 rendered_body = _render_related_pages(
                     rendered_body,
@@ -499,7 +522,9 @@ class WikiRenderer:
                     incoming=incoming,
                     page_titles=page_titles,
                 )
-            source_ids = list(dict.fromkeys(value.strip() for value in page.source_ids if value.strip()))
+            source_ids = list(
+                dict.fromkeys(value.strip() for value in page.source_ids if value.strip())
+            )
             rendered_body = _render_citations(
                 rendered_body,
                 old_body=old_body,
@@ -507,13 +532,16 @@ class WikiRenderer:
                 source_roots=source_roots,
                 inline_citations=inline_citations,
             )
-            visible = _frontmatter(
-                old=old_frontmatter,
-                page_type=page.page_type.strip(),
-                title=page.title.strip(),
-                summary=page.summary.strip(),
-                tags=page.tags,
-            ) + rendered_body
+            visible = (
+                _frontmatter(
+                    old=old_frontmatter,
+                    page_type=page.page_type.strip(),
+                    title=page.title.strip(),
+                    summary=page.summary.strip(),
+                    tags=page.tags,
+                )
+                + rendered_body
+            )
 
             if memory_target:
                 mf = old_memory or MemoryFile(uri=uri)
@@ -598,6 +626,7 @@ __all__ = [
     "WikiRenderer",
     "content_hash",
     "has_unclosed_frontmatter",
+    "is_reserved_output_file_uri",
     "is_reserved_wiki_page_uri",
     "validate_declared_okf_markdown",
     "validate_relative_file_path",

@@ -27,6 +27,7 @@ from vikingbot.compile.models import (
     WikiBundleDraft,
 )
 from vikingbot.compile.renderer import (
+    is_reserved_output_file_uri,
     is_reserved_wiki_page_uri,
     validate_declared_okf_markdown,
     validate_relative_file_path,
@@ -461,9 +462,17 @@ class SubmitWikiBundleTool(Tool):
                 raise ValueError(
                     f"page {page.page_id} body_workspace_path must contain UTF-8 Markdown"
                 ) from exc
-            pages.append(
-                page.model_copy(update={"body_markdown": body, "body_workspace_path": None})
-            )
+            updates: dict[str, Any] = {
+                "body_markdown": body,
+                "body_workspace_path": None,
+            }
+            if (
+                page.update_uri is None
+                and page.path_hint is None
+                and _path_is_within(workspace_path, COMPILE_WIKI_PAGE_ROOT)
+            ):
+                updates["path_hint"] = workspace_path.removeprefix(COMPILE_WIKI_PAGE_ROOT + "/")
+            pages.append(page.model_copy(update=updates))
         return bundle.model_copy(update={"pages": pages})
 
     async def _validate_bundle(
@@ -543,7 +552,7 @@ class SubmitWikiBundleTool(Tool):
                 final_uri = safe_join_viking_uri(self.target_uri, relative).rstrip("/")
             elif file.update_uri:
                 final_uri = validate_safe_viking_uri_path(file.update_uri).rstrip("/")
-                if is_reserved_wiki_page_uri(final_uri):
+                if is_reserved_output_file_uri(final_uri):
                     raise ValueError(f"file {index} cannot update a reserved file")
                 if final_uri not in self.file_catalog_uris:
                     raise ValueError(f"file {index} update_uri is not in the catalog")

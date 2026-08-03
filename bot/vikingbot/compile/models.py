@@ -78,13 +78,14 @@ class WikiPageDraft(BaseModel):
         description=(
             "Inline Markdown body for an actual Wiki page. Link relevant known source "
             "URIs with ordinary Markdown links; never invent link targets."
-        )
+        ),
     )
     body_workspace_path: str | None = Field(
         default=None,
         description=(
             f"Relative path under {COMPILE_WIKI_PAGE_ROOT}/ for a generated "
-            "UTF-8 Markdown Wiki body."
+            "UTF-8 Markdown Wiki body. When path_hint is omitted, the path below this "
+            "directory becomes the final Wiki page path."
         ),
     )
     source_ids: list[str] = Field(
@@ -94,8 +95,8 @@ class WikiPageDraft(BaseModel):
     path_hint: str | None = Field(
         default=None,
         description=(
-            "Optional relative path for a new Wiki page. Omit by default so its filename "
-            "derives from title; use only for Skill-required paths and avoid generic basenames."
+            "Optional final relative path for a new Wiki page. It overrides the path derived "
+            "from body_workspace_path; use it only when the Skill requires a different path."
         ),
     )
     update_uri: str | None = None
@@ -103,9 +104,7 @@ class WikiPageDraft(BaseModel):
     @model_validator(mode="after")
     def validate_body(self) -> "WikiPageDraft":
         if (self.body_markdown is None) == (self.body_workspace_path is None):
-            raise ValueError(
-                "exactly one of body_markdown or body_workspace_path is required"
-            )
+            raise ValueError("exactly one of body_markdown or body_workspace_path is required")
         return self
 
 
@@ -146,7 +145,8 @@ class WikiBundleDraft(BaseModel):
 
     pages: list[WikiPageDraft] = Field(
         description=(
-            "Actual Wiki pages only; do not place Skill-prescribed artifact files here."
+            "Actual Wiki pages only; navigation files such as index.md and log.md are "
+            "artifacts and must not be placed here."
         )
     )
     files: list[CompileFileDraft] = Field(

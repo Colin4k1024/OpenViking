@@ -99,7 +99,10 @@ def test_compile_bundle_schema_distinguishes_wiki_pages_and_artifact_files():
     assert (
         "__compile_staging__/wiki_pages/" in page_properties["body_workspace_path"]["description"]
     )
-    assert "filename derives from title" in page_properties["path_hint"]["description"]
+    assert "overrides the path derived" in page_properties["path_hint"]["description"]
+    assert (
+        "becomes the final Wiki page path" in page_properties["body_workspace_path"]["description"]
+    )
     assert "supplied source roots" in page_properties["source_ids"]["description"]
     assert "preserve every required path and format" in properties["files"]["description"]
 
@@ -321,12 +324,112 @@ def test_renderer_creates_okf_pages_links_and_citations():
     assert "[1] [source](viking://resources/source)" in first["content"]
 
 
+def test_renderer_localizes_generated_sections_from_body_language():
+    source_detail = "viking://resources/source/章节.md"
+    bundle = WikiBundleDraft.model_validate(
+        {
+            "pages": [
+                _page(
+                    1,
+                    "语文课标",
+                    path_hint="entities/语文课标.md",
+                    body_markdown=(
+                        "语文课程通过阅读框架描述第一学段要求。\n\n"
+                        "https://example.com/a/very/long/english/source/path\n\n"
+                        "# 引用来源\n\n"
+                        f"[9] [章节]({source_detail})"
+                    ),
+                ),
+                _page(
+                    2,
+                    "阅读框架",
+                    path_hint="concepts/阅读框架.md",
+                    body_markdown="阅读框架描述学生的主要能力层级。",
+                ),
+            ],
+            "links": [{"f": 1, "t": 2, "match_text": "阅读框架"}],
+        }
+    )
+
+    rendered = WikiRenderer().render(
+        bundle=bundle,
+        target_uri="viking://resources/wiki",
+        source_roots={"src_1": "viking://resources/source"},
+        catalog_uris=set(),
+        existing_raw={},
+    )
+    operations = {operation["uri"]: operation["content"] for operation in rendered.operations}
+    standard = operations["viking://resources/wiki/entities/语文课标.md"]
+    framework = operations["viking://resources/wiki/concepts/阅读框架.md"]
+
+    assert standard.count("# 引用来源") == 1
+    assert "# Citations" not in standard
+    assert f"[1] [章节]({source_detail})" in standard
+    assert "## 相关页面" in framework
+    assert "Related pages" not in framework
+    assert "# 引用来源" in framework
+
+
 def test_wiki_page_title_path_normalizes_spaced_dashes_only():
     assert (
         wiki_page_path_from_title("Experimental Designs - Residual Networks")
         == "Experimental_Designs_Residual_Networks"
     )
     assert wiki_page_path_from_title("One-Page Overview") == "One-Page_Overview"
+
+
+def test_renderer_treats_index_and_log_as_artifacts_not_wiki_pages():
+    page_bundle = WikiBundleDraft.model_validate(
+        {"pages": [_page(1, "Index", path_hint="index.md")]}
+    )
+    with pytest.raises(ValueError, match="reserved Wiki page path"):
+        WikiRenderer().render(
+            bundle=page_bundle,
+            target_uri="viking://resources/wiki",
+            source_roots={"src_1": "viking://resources/source"},
+            catalog_uris=set(),
+            existing_raw={},
+        )
+
+    artifact_bundle = WikiBundleDraft.model_validate(
+        {
+            "pages": [],
+            "files": [
+                {"path": "index.md", "content": "# Wiki\n"},
+                {"path": "concepts/log.md", "content": "# Updates\n"},
+            ],
+        }
+    )
+    rendered = WikiRenderer().render(
+        bundle=artifact_bundle,
+        target_uri="viking://resources/wiki",
+        source_roots={},
+        catalog_uris=set(),
+        existing_raw={},
+    )
+    assert rendered.created == [
+        "viking://resources/wiki/index.md",
+        "viking://resources/wiki/concepts/log.md",
+    ]
+    assert rendered.wiki_uris == []
+
+
+def test_renderer_updates_existing_index_artifact():
+    uri = "viking://resources/wiki/index.md"
+    bundle = WikiBundleDraft.model_validate(
+        {"pages": [], "files": [{"update_uri": uri, "content": "# New index\n"}]}
+    )
+    rendered = WikiRenderer().render(
+        bundle=bundle,
+        target_uri="viking://resources/wiki",
+        source_roots={},
+        catalog_uris=set(),
+        file_catalog_uris={uri},
+        existing_raw={},
+        existing_bytes={uri: b"# Old index\n"},
+    )
+    assert rendered.updated == [uri]
+    assert rendered.operations[0]["uri"] == uri
 
 
 def test_renderer_linkifies_source_uris_and_adds_resource_backlinks():
@@ -804,6 +907,26 @@ async def test_submit_tool_raw_update_cannot_remove_okf_from_existing_wiki_page(
 
 
 @pytest.mark.asyncio
+async def test_submit_tool_allows_standard_index_artifact_update():
+    uri = "viking://resources/wiki/index.md"
+    tool = SubmitWikiBundleTool(
+        source_ids={"src_1"},
+        catalog_uris=set(),
+        file_catalog_uris={uri},
+        target_uri="viking://resources/wiki",
+        limits=CompileLimits(),
+    )
+
+    result = await tool.execute(
+        ToolContext(),
+        pages=[],
+        files=[{"update_uri": uri, "content": "# Updated index\n"}],
+    )
+
+    assert result == "Wiki bundle accepted with 0 page(s) and 1 file(s)."
+
+
+@pytest.mark.asyncio
 async def test_submit_tool_resolves_existing_updates_outside_relevant_catalog():
     wiki_uri = "viking://resources/wiki/existing.md"
     artifact_uri = "viking://resources/wiki/PAPER.md"
@@ -1022,7 +1145,7 @@ async def test_submit_tool_materializes_workspace_page_body_before_validation():
     class Sandbox:
         async def read_file_bytes(self, path):
             return {
-                "__compile_staging__/wiki_pages/overview.md": b"Read Details next.",
+                "__compile_staging__/wiki_pages/concepts/overview.md": b"Read Details next.",
                 "__compile_staging__/wiki_pages/details.md": b"Details body.",
             }[path]
 
@@ -1044,7 +1167,8 @@ async def test_submit_tool_materializes_workspace_page_body_before_validation():
     )
     overview = _page(1, "Overview")
     overview.pop("body_markdown")
-    overview["body_workspace_path"] = "__compile_staging__/wiki_pages/overview.md"
+    overview["path_hint"] = None
+    overview["body_workspace_path"] = "__compile_staging__/wiki_pages/concepts/overview.md"
     details = _page(2, "Details")
     details.pop("body_markdown")
     details["body_workspace_path"] = "__compile_staging__/wiki_pages/details.md"
@@ -1059,6 +1183,7 @@ async def test_submit_tool_materializes_workspace_page_body_before_validation():
     assert tool.bundle is not None
     assert tool.bundle.pages[0].body_markdown == "Read Details next."
     assert tool.bundle.pages[0].body_workspace_path is None
+    assert tool.bundle.pages[0].path_hint == "concepts/overview.md"
 
     rejected = await tool.execute(
         context,
@@ -1067,6 +1192,49 @@ async def test_submit_tool_materializes_workspace_page_body_before_validation():
     )
     assert "must be generated with write_file" in rejected
     assert tool.bundle is None
+
+
+@pytest.mark.asyncio
+async def test_submit_tool_workspace_update_does_not_derive_path_hint():
+    uri = "viking://resources/wiki/existing.md"
+
+    class Sandbox:
+        async def read_file_bytes(self, path):
+            assert path == "__compile_staging__/wiki_pages/existing.md"
+            return b"Updated body."
+
+    class Manager:
+        async def get_sandbox(self, session_key):
+            assert session_key is not None
+            return Sandbox()
+
+    async def resolve(candidate):
+        return candidate == uri
+
+    context = ToolContext(
+        session_key=SessionKey(type="compile", channel_id="cmp", chat_id="cmp"),
+        sandbox_manager=Manager(),
+    )
+    tool = SubmitWikiBundleTool(
+        source_ids={"src_1"},
+        catalog_uris=set(),
+        file_catalog_uris={uri},
+        target_uri="viking://resources/wiki",
+        limits=CompileLimits(),
+        require_workspace_pages=True,
+        wiki_uri_resolver=resolve,
+    )
+    page = _page(1, "Existing", update_uri=uri, path_hint=None)
+    page.pop("body_markdown")
+    page["body_workspace_path"] = "__compile_staging__/wiki_pages/existing.md"
+
+    accepted = await tool.execute(context, pages=[page], files=[])
+
+    assert accepted == "Wiki bundle accepted with 1 page(s) and 0 file(s)."
+    assert tool.bundle is not None
+    assert tool.bundle.pages[0].body_markdown == "Updated body."
+    assert tool.bundle.pages[0].body_workspace_path is None
+    assert tool.bundle.pages[0].path_hint is None
 
 
 @pytest.mark.asyncio
@@ -1877,6 +2045,41 @@ async def test_target_catalog_search_failure_keeps_collision_inventory():
 
     assert catalog == []
     assert set(inventory) == {"viking://resources/wiki/existing.md"}
+
+
+@pytest.mark.asyncio
+async def test_target_catalog_keeps_standard_index_and_log_artifacts():
+    root = "viking://resources/wiki"
+
+    class Client:
+        async def tree(self, uri, *, node_limit):
+            assert uri == root
+            return [
+                {"uri": f"{root}/index.md", "isDir": False},
+                {"uri": f"{root}/log.md", "isDir": False},
+                {"uri": f"{root}/.overview.md", "isDir": False},
+            ]
+
+        async def find(self, query, **kwargs):
+            return {
+                "resources": [
+                    {"uri": f"{root}/index.md"},
+                    {"uri": f"{root}/log.md"},
+                ]
+            }
+
+        async def read_raw(self, uri, *, offset=0, limit=-1):
+            return "# Navigation\n"
+
+    service = object.__new__(BotCompileService)
+    service.limits = CompileLimits()
+    catalog, inventory = await service._build_catalog(Client(), root, query="wiki")
+
+    assert set(inventory) == {f"{root}/index.md", f"{root}/log.md"}
+    assert [(item["uri"], item["kind"]) for item in catalog] == [
+        (f"{root}/index.md", "file"),
+        (f"{root}/log.md", "file"),
+    ]
 
 
 @pytest.mark.asyncio
