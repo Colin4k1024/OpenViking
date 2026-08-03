@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _ARCHIVE_WAIT_POLL_SECONDS = 0.1
+_ARCHIVE_WAIT_TIMEOUT_SECONDS = 1800.0
 _PHASE2_QUEUE_WAIT_TIMEOUT_SECONDS = 1800.0
 _MEMORY_EXTRACTION_MAX_RETRIES = 3
 _MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS = 1.0
@@ -3743,11 +3745,32 @@ class Session:
             raise ValueError(f"Invalid archive URI: {archive_uri}")
         return int(match.group(1))
 
-    async def _wait_for_previous_archive_done(self, archive_index: int) -> bool:
-        """Wait until every earlier archive reaches a terminal state."""
+    async def _wait_for_previous_archive_done(
+        self,
+        archive_index: int,
+        timeout: float = _ARCHIVE_WAIT_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Wait until every earlier archive reaches a terminal state.
+
+        The wait is bounded: an earlier archive can stay pending forever when
+        its Phase 1 completed (``phase1.status=ready``) but the matching queue
+        item was lost (process crash, upgrade, or a historical enqueue bug).
+        Such an orphan is invisible from here, so after ``timeout`` seconds of
+        polling the still-pending predecessors are marked terminally failed and
+        a ``TimeoutError`` is raised. The caller's failure path then writes the
+        current archive's ``.failed.json`` and fails the task, so the worker
+        slot is released instead of being wedged forever; the next commit
+        replays the raw messages of every failed archive through the existing
+        ``_prepare_phase2_archive_messages`` roll-forward, so no data is lost.
+
+        Raises:
+            TimeoutError: earlier archives were still pending after ``timeout``
+                seconds; they have been marked failed for later raw replay.
+        """
         if archive_index <= 1 or not self._viking_fs:
             return True
 
+        deadline = time.monotonic() + timeout
         while True:
             earlier_states = [
                 state for state in await self._scan_archive_states() if state.index < archive_index
@@ -3775,6 +3798,32 @@ class Session:
                 reconciled = True
             if reconciled:
                 continue
+            if time.monotonic() >= deadline:
+                stuck_ids = [state.archive_id for state in pending_states]
+                for state in pending_states:
+                    logger.error(
+                        "Archive %s stayed pending for over %.0fs while blocking "
+                        "archive_%03d Phase 2; its queue item is presumed lost. "
+                        "Marking it failed so its raw messages replay into a "
+                        "later commit.",
+                        state.archive_id,
+                        timeout,
+                        archive_index,
+                    )
+                    await self._write_failed_marker(
+                        state.archive_uri,
+                        stage="phase2_wait_timeout",
+                        error=(
+                            f"Archive stayed pending for over {timeout:.0f}s; "
+                            "its Phase 2 queue item is presumed lost"
+                        ),
+                    )
+                raise TimeoutError(
+                    f"Timed out after {timeout:.0f}s waiting for earlier archives "
+                    f"{stuck_ids} to finish before archive_{archive_index:03d} "
+                    "Phase 2; they were marked failed for raw replay by a later "
+                    "commit"
+                )
             await asyncio.sleep(_ARCHIVE_WAIT_POLL_SECONDS)
 
     async def _prepare_phase2_archive_messages(

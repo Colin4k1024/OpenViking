@@ -357,6 +357,45 @@ async def test_phase2_waits_for_all_earlier_pending_archives(
     assert await asyncio.wait_for(waiter, timeout=0.5)
 
 
+async def test_phase2_wait_times_out_and_fails_orphaned_pending_archive(
+    client: AsyncOpenViking,
+    monkeypatch,
+):
+    """A pending predecessor whose queue item was lost must not stall forever.
+
+    After the bounded wait expires, the orphan is marked terminally failed for
+    raw replay and the current commit fails cleanly instead of wedging its
+    worker slot (see #3396).
+    """
+    session = client.session(session_id="phase2_wait_timeout_orphan_test")
+    await session.ensure_exists()
+    first_uri = await _write_archive(
+        session,
+        1,
+        [_text_message("u1", "user", "orphaned pending one")],
+    )
+    monkeypatch.setattr("openviking.session.session._ARCHIVE_WAIT_POLL_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError, match="archive_001"):
+        await asyncio.wait_for(
+            session._wait_for_previous_archive_done(2, timeout=0.05),
+            timeout=2.0,
+        )
+
+    failed = json.loads(
+        await session._viking_fs.read_file(f"{first_uri}/.failed.json", ctx=session.ctx)
+    )
+    assert failed["stage"] == "phase2_wait_timeout"
+    states = {state.archive_id: state.state for state in await session._scan_archive_states()}
+    assert states["archive_001"] == "failed"
+
+    # The next commit's wait now sees only terminal predecessors and proceeds.
+    assert await asyncio.wait_for(
+        session._wait_for_previous_archive_done(2, timeout=0.05),
+        timeout=2.0,
+    )
+
+
 async def test_missing_previous_archive_directory_does_not_block_phase2(
     client: AsyncOpenViking,
 ):
