@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from openviking.core.directories import DirectoryInitializer
 from openviking.core.namespace import canonicalize_uri
 from openviking.privacy import UserPrivacyConfigService
+from openviking.pyagfs.exceptions import AGFSIoError, AGFSPermissionDeniedError
 from openviking.resource.watch_scheduler import WatchScheduler
 from openviking.server.identity import RequestContext, Role
 from openviking.service.debug_service import DebugService
@@ -341,13 +342,37 @@ class OpenVikingService:
         )
         self._directory_initializer = directory_initializer
         default_ctx = RequestContext(user=self._user, role=Role.ROOT)
-        account_count = await directory_initializer.initialize_account_directories(default_ctx)
-        user_count = await directory_initializer.initialize_user_directories(default_ctx)
-        logger.info(
-            "Initialized preset directories account=%d user=%d",
-            account_count,
-            user_count,
-        )
+        if self._config.storage.enable_background_workers:
+            account_count = await directory_initializer.initialize_account_directories(default_ctx)
+            user_count = await directory_initializer.initialize_user_directories(default_ctx)
+            logger.info(
+                "Initialized preset directories account=%d user=%d",
+                account_count,
+                user_count,
+            )
+        else:
+            # Read-only replica: writer owns directory creation; tolerate a read-only workspace.
+            try:
+                account_count = await directory_initializer.initialize_account_directories(
+                    default_ctx
+                )
+                user_count = await directory_initializer.initialize_user_directories(default_ctx)
+                logger.info(
+                    "Verified preset directories account=%d user=%d (read-only replica)",
+                    account_count,
+                    user_count,
+                )
+            except (
+                AGFSPermissionDeniedError,
+                AGFSIoError,
+                PermissionError,
+                OSError,
+            ) as exc:
+                logger.warning(
+                    "Skipping preset directory creation on read-only workspace "
+                    "(storage.enable_background_workers=false): %s",
+                    exc,
+                )
 
         self._privacy_config_service = UserPrivacyConfigService(self._viking_fs)
 
@@ -404,39 +429,47 @@ class OpenVikingService:
             agfs_client=self._agfs_client,
         )
 
-        if self._queue_manager:
-            for queue_name in (
-                self._queue_manager.EXTERNAL_PARSE,
-                self._queue_manager.ADD_RESOURCE,
-            ):
-                self._queue_manager.get_queue(
-                    queue_name,
-                    dequeue_handler=AddResourceProcessor(
-                        self._resource_service,
-                        asyncio.get_running_loop(),
+        # Gate autonomous background write subsystems (QueueFS consumers + WatchScheduler);
+        # read-only replicas set enable_background_workers=false to avoid duplicate writes.
+        if self._config.storage.enable_background_workers:
+            if self._queue_manager:
+                for queue_name in (
+                    self._queue_manager.EXTERNAL_PARSE,
+                    self._queue_manager.ADD_RESOURCE,
+                ):
+                    self._queue_manager.get_queue(
                         queue_name,
-                        self._viking_fs,
+                        dequeue_handler=AddResourceProcessor(
+                            self._resource_service,
+                            asyncio.get_running_loop(),
+                            queue_name,
+                            self._viking_fs,
+                        ),
+                        allow_create=True,
+                    )
+                self._queue_manager.get_queue(
+                    self._queue_manager.SESSION_COMMIT,
+                    dequeue_handler=SessionCommitProcessor(
+                        self._session_service,
+                        asyncio.get_running_loop(),
                     ),
                     allow_create=True,
                 )
-            self._queue_manager.get_queue(
-                self._queue_manager.SESSION_COMMIT,
-                dequeue_handler=SessionCommitProcessor(
-                    self._session_service,
-                    asyncio.get_running_loop(),
-                ),
-                allow_create=True,
+                await self._queue_manager.prepare_task_tracking(get_task_tracker())
+
+            # Do not let watches produce queue work while task ownership is being
+            # rebuilt from QueueFS. Consumers start only after the scheduler is ready.
+            await self._watch_scheduler.start()
+            logger.info("WatchScheduler started")
+
+            if self._queue_manager:
+                self._queue_manager.start()
+                logger.info("QueueManager workers started")
+        else:
+            logger.warning(
+                "storage.enable_background_workers=false: skipping QueueFS consumers and "
+                "WatchScheduler; this process serves reads only."
             )
-            await self._queue_manager.prepare_task_tracking(get_task_tracker())
-
-        # Do not let watches produce queue work while task ownership is being
-        # rebuilt from QueueFS. Consumers start only after the scheduler is ready.
-        await self._watch_scheduler.start()
-        logger.info("WatchScheduler started")
-
-        if self._queue_manager:
-            self._queue_manager.start()
-            logger.info("QueueManager workers started")
 
         # Register as the process-wide service so flows that resolve the
         # service via the dependency global (e.g. background reindex tasks

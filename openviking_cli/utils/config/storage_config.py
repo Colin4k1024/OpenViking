@@ -30,6 +30,14 @@ class StorageConfig(BaseModel):
             "explicitly accept the risk of multi-process storage contention."
         ),
     )
+    enable_background_workers: bool = Field(
+        default=True,
+        description=(
+            "Whether to run autonomous background write subsystems (QueueFS consumer "
+            "workers + WatchScheduler). Set false for a read-only replica sharing the "
+            "workspace with a writer, so it only serves reads and avoids duplicate writes."
+        ),
+    )
 
     agfs: AGFSConfig = Field(default_factory=AGFSConfig, description="AGFS configuration")
 

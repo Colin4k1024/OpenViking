@@ -327,6 +327,45 @@ def test_openviking_config_transaction_redo_recovery_enabled_can_be_disabled(mon
     OpenVikingConfigSingleton.reset_instance()
 
 
+def test_openviking_config_enable_background_workers_defaults_to_true(monkeypatch):
+    monkeypatch.setenv(OPENVIKING_CONFIG_ENV, "/tmp/codex-no-config.json")
+
+    from openviking_cli.utils.config.open_viking_config import (
+        OpenVikingConfig,
+        OpenVikingConfigSingleton,
+    )
+
+    config = OpenVikingConfig.from_dict({})
+
+    assert config.storage.enable_background_workers is True
+
+    OpenVikingConfigSingleton.reset_instance()
+
+
+def test_openviking_config_enable_background_workers_can_be_disabled(monkeypatch):
+    monkeypatch.setenv(OPENVIKING_CONFIG_ENV, "/tmp/codex-no-config.json")
+
+    from openviking_cli.utils.config.open_viking_config import (
+        OpenVikingConfig,
+        OpenVikingConfigSingleton,
+    )
+
+    config = OpenVikingConfig.from_dict(
+        {
+            "storage": {
+                "enable_background_workers": False,
+                "skip_process_lock": True,
+            }
+        }
+    )
+
+    assert config.storage.enable_background_workers is False
+    assert config.storage.skip_process_lock is True
+
+    OpenVikingConfigSingleton.reset_instance()
+
+
+
 @pytest.mark.parametrize("field_name", ["hotness_alpha", "score_propagation_alpha"])
 def test_openviking_config_retrieval_alpha_validates_range(monkeypatch, field_name):
     monkeypatch.setenv(OPENVIKING_CONFIG_ENV, "/tmp/codex-no-config.json")
